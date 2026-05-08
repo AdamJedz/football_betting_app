@@ -113,6 +113,19 @@ def kickoff_datetime(date_str: str, time_str: str) -> datetime:
     return datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M").replace(tzinfo=WARSAW)
 
 
+def can_set_result(date_str: str, time_str: str, username: str) -> bool:
+    """Admin: any time. Others: 2h after kickoff."""
+    kickoff = kickoff_datetime(date_str, time_str)
+    now = datetime.now(WARSAW)
+    if username == "admin":
+        return True
+    return now >= kickoff + timedelta(hours=2)
+
+
+def result_unlock_time(date_str: str, time_str: str) -> datetime:
+    return kickoff_datetime(date_str, time_str) + timedelta(hours=2)
+
+
 def outcome_label(outcome: str, match: dict) -> str:
     """For displaying placed bets — flag + name only, no odds."""
     if outcome == "home":

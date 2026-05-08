@@ -1,19 +1,24 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
 
 from auth import logout, refresh_points, require_auth
 from database import (
+    clear_match_result,
     get_leaderboard,
     get_match_bets,
     get_match_odds,
+    get_match_result,
     get_user_bet,
     init_db,
     set_match_odds,
+    set_match_result,
     upsert_bet,
 )
 from matches import (
+    can_set_result,
     flag,
     format_day_label,
     get_matches_by_day,
@@ -21,6 +26,7 @@ from matches import (
     kickoff_datetime,
     outcome_label,
     outcome_opts,
+    result_unlock_time,
 )
 
 st.set_page_config(
@@ -223,3 +229,73 @@ with tab2:
                                 set_match_odds(match["id"], new_home, new_draw, new_away, username)
                                 st.success("Kursy zaktualizowane!")
                                 st.rerun()
+
+                    # ── Kto zwyciężył ─────────────────────────────────────────
+                    match_result = get_match_result(match["id"])
+                    user_can_set = can_set_result(match["date"], match["time"], username)
+
+                    with st.expander("🏆 Kto zwyciężył?"):
+                        if match_result:
+                            st.success(
+                                f"Wynik: **{outcome_label(match_result['result'], match)}** "
+                                f"— ustawił {match_result['set_by']}"
+                            )
+                            # Payout summary
+                            paid = [b for b in all_bets if b.get("payout")]
+                            if paid:
+                                st.markdown("**Wypłaty:**")
+                                for b in paid:
+                                    st.write(
+                                        f"  {flag(match['home'] if b['outcome']=='home' else match['away']) if b['outcome']!='draw' else '🤝'} "
+                                        f"**{b['username']}**: +{b['payout']:.2f} pkt"
+                                    )
+
+                        if user_can_set:
+                            r_opts = outcome_opts(match, odds)
+                            with st.form(key=f"result_{match['id']}"):
+                                selected_result = st.radio(
+                                    "Wynik meczu",
+                                    options=list(r_opts.keys()),
+                                    format_func=lambda k: r_opts[k],
+                                    index=(
+                                        list(r_opts.keys()).index(match_result["result"])
+                                        if match_result else 0
+                                    ),
+                                    horizontal=True,
+                                )
+                                col_save, col_revert = st.columns(2)
+                                save = col_save.form_submit_button(
+                                    "✅ Zapisz wynik", use_container_width=True
+                                )
+                                revert = col_revert.form_submit_button(
+                                    "🔄 Cofnij wynik",
+                                    use_container_width=True,
+                                    disabled=not match_result,
+                                )
+
+                            if save:
+                                ok, msg = set_match_result(match["id"], selected_result, username, odds)
+                                if ok:
+                                    st.success(msg)
+                                    refresh_points()
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
+
+                            if revert:
+                                ok, msg = clear_match_result(match["id"])
+                                if ok:
+                                    st.success(msg)
+                                    refresh_points()
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
+
+                        elif not match_result:
+                            unlock = result_unlock_time(match["date"], match["time"])
+                            now_w = datetime.now(ZoneInfo("Europe/Warsaw"))
+                            if now_w < kickoff:
+                                st.caption("⏳ Mecz jeszcze się nie rozpoczął.")
+                            else:
+                                mins = max(0, int((unlock - now_w).total_seconds() / 60))
+                                st.caption(f"⏳ Dostępne za ~{mins} min (2h po starcie)")

@@ -36,11 +36,17 @@ def init_db() -> None:
                     match_id   TEXT    NOT NULL,
                     outcome    TEXT    NOT NULL CHECK(outcome IN ('home', 'draw', 'away')),
                     amount     REAL    NOT NULL,
+                    payout     REAL,
                     placed_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(username, match_id)
                 )
             """)
+        # Add payout column if missing (migration for existing DBs)
+        try:
+            conn.execute("SELECT payout FROM bets LIMIT 1")
+        except sqlite3.OperationalError:
+            conn.execute("ALTER TABLE bets ADD COLUMN payout REAL")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS match_odds (
                 match_id   TEXT PRIMARY KEY,
@@ -49,6 +55,14 @@ def init_db() -> None:
                 away_odds  REAL NOT NULL,
                 updated_by TEXT,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS match_results (
+                match_id   TEXT PRIMARY KEY,
+                result     TEXT NOT NULL CHECK(result IN ('home', 'draw', 'away')),
+                set_by     TEXT NOT NULL,
+                set_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         conn.commit()
@@ -213,10 +227,104 @@ def get_match_bets(match_id: str) -> list[dict]:
     """All bets placed on a given match, ordered by time placed."""
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT username, outcome, amount FROM bets WHERE match_id = ? ORDER BY placed_at",
+            "SELECT username, outcome, amount, payout FROM bets WHERE match_id = ? ORDER BY placed_at",
             (match_id,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_match_result(match_id: str) -> dict | None:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT result, set_by, set_at FROM match_results WHERE match_id = ?",
+            (match_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def set_match_result(
+    match_id: str, result: str, setter: str, odds: tuple[float, float, float]
+) -> tuple[bool, str]:
+    """Set or update match result. Reverts old payouts then applies new ones atomically."""
+    if result not in ("home", "draw", "away"):
+        return False, "Nieprawidłowy wynik."
+
+    odds_map = {"home": odds[0], "draw": odds[1], "away": odds[2]}
+
+    with get_connection() as conn:
+        existing = conn.execute(
+            "SELECT result FROM match_results WHERE match_id = ?", (match_id,)
+        ).fetchone()
+
+        # Revert any existing payouts before applying new ones
+        paid_bets = conn.execute(
+            "SELECT username, payout FROM bets WHERE match_id = ? AND payout IS NOT NULL",
+            (match_id,),
+        ).fetchall()
+        for b in paid_bets:
+            conn.execute(
+                "UPDATE users SET points = ROUND(points - ?, 2) WHERE username = ?",
+                (b["payout"], b["username"]),
+            )
+        conn.execute("UPDATE bets SET payout = NULL WHERE match_id = ?", (match_id,))
+
+        # Upsert result
+        if existing:
+            conn.execute(
+                "UPDATE match_results SET result=?, set_by=?, set_at=CURRENT_TIMESTAMP WHERE match_id=?",
+                (result, setter, match_id),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO match_results (match_id, result, set_by) VALUES (?, ?, ?)",
+                (match_id, result, setter),
+            )
+
+        # Pay out winning bets
+        winning_bets = conn.execute(
+            "SELECT id, username, amount FROM bets WHERE match_id = ? AND outcome = ?",
+            (match_id, result),
+        ).fetchall()
+        winning_odds = odds_map[result]
+        payout_count = 0
+        for b in winning_bets:
+            payout = round(b["amount"] * winning_odds, 2)
+            conn.execute("UPDATE bets SET payout = ? WHERE id = ?", (payout, b["id"]))
+            conn.execute(
+                "UPDATE users SET points = ROUND(points + ?, 2) WHERE username = ?",
+                (payout, b["username"]),
+            )
+            payout_count += 1
+
+        conn.commit()
+
+    action = "zaktualizowany" if existing else "zapisany"
+    return True, f"Wynik {action}! Wypłacono punkty dla {payout_count} graczy."
+
+
+def clear_match_result(match_id: str) -> tuple[bool, str]:
+    """Remove result and reverse all payouts."""
+    with get_connection() as conn:
+        existing = conn.execute(
+            "SELECT result FROM match_results WHERE match_id = ?", (match_id,)
+        ).fetchone()
+        if not existing:
+            return False, "Brak zapisanego wyniku."
+
+        paid_bets = conn.execute(
+            "SELECT username, payout FROM bets WHERE match_id = ? AND payout IS NOT NULL",
+            (match_id,),
+        ).fetchall()
+        for b in paid_bets:
+            conn.execute(
+                "UPDATE users SET points = ROUND(points - ?, 2) WHERE username = ?",
+                (b["payout"], b["username"]),
+            )
+        conn.execute("UPDATE bets SET payout = NULL WHERE match_id = ?", (match_id,))
+        conn.execute("DELETE FROM match_results WHERE match_id = ?", (match_id,))
+        conn.commit()
+
+    return True, f"Wynik cofnięty, przywrócono punkty dla {len(paid_bets)} graczy."
 
 
 def get_leaderboard() -> list[dict]:
