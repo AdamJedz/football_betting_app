@@ -41,6 +41,43 @@ def init_db() -> None:
                     UNIQUE(username, match_id)
                 )
             """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS match_odds (
+                match_id   TEXT PRIMARY KEY,
+                home_odds  REAL NOT NULL,
+                draw_odds  REAL NOT NULL,
+                away_odds  REAL NOT NULL,
+                updated_by TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+
+
+def get_match_odds(match_id: str) -> tuple[float, float, float] | None:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT home_odds, draw_odds, away_odds FROM match_odds WHERE match_id = ?",
+            (match_id,),
+        ).fetchone()
+    return (row["home_odds"], row["draw_odds"], row["away_odds"]) if row else None
+
+
+def set_match_odds(
+    match_id: str, home: float, draw: float, away: float, username: str
+) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """INSERT INTO match_odds (match_id, home_odds, draw_odds, away_odds, updated_by, updated_at)
+               VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(match_id) DO UPDATE SET
+                   home_odds  = excluded.home_odds,
+                   draw_odds  = excluded.draw_odds,
+                   away_odds  = excluded.away_odds,
+                   updated_by = excluded.updated_by,
+                   updated_at = CURRENT_TIMESTAMP""",
+            (match_id, round(home, 2), round(draw, 2), round(away, 2), username),
+        )
         conn.commit()
 
 

@@ -113,15 +113,19 @@ def kickoff_datetime(date_str: str, time_str: str) -> datetime:
     return datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M").replace(tzinfo=WARSAW)
 
 
-def team_label(team: str, odds_value: float) -> str:
-    """Flag + name + odds: '🇲🇽 Meksyk (1.80)'"""
-    return f"{flag(team)} {team} ({odds_value:.2f})"
-
-
 def outcome_label(outcome: str, match: dict) -> str:
-    o = match["odds"]
+    """For displaying placed bets — flag + name only, no odds."""
     if outcome == "home":
-        return team_label(match["home"], o[0])
+        return f"{flag(match['home'])} {match['home']}"
     if outcome == "draw":
-        return f"🤝 Remis ({o[1]:.2f})"
-    return team_label(match["away"], o[2])
+        return "🤝 Remis"
+    return f"{flag(match['away'])} {match['away']}"
+
+
+def outcome_opts(match: dict, odds: tuple) -> dict:
+    """Radio options with current odds: {key: label}"""
+    return {
+        "home": f"{flag(match['home'])} {match['home']} ({odds[0]:.2f})",
+        "draw": f"🤝 Remis ({odds[1]:.2f})",
+        "away": f"{flag(match['away'])} {match['away']} ({odds[2]:.2f})",
+    }

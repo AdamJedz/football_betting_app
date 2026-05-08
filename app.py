@@ -4,7 +4,15 @@ import pandas as pd
 import streamlit as st
 
 from auth import logout, refresh_points, require_auth
-from database import get_leaderboard, get_match_bets, get_user_bet, init_db, upsert_bet
+from database import (
+    get_leaderboard,
+    get_match_bets,
+    get_match_odds,
+    get_user_bet,
+    init_db,
+    set_match_odds,
+    upsert_bet,
+)
 from matches import (
     flag,
     format_day_label,
@@ -12,7 +20,7 @@ from matches import (
     is_betting_open,
     kickoff_datetime,
     outcome_label,
-    team_label,
+    outcome_opts,
 )
 
 st.set_page_config(
@@ -46,7 +54,6 @@ with tab1:
         st.info("Brak graczy.")
     else:
         MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
-
         df = pd.DataFrame(leaderboard).rename(columns={"username": "Gracz", "points": "Punkty"})
         df.insert(0, "Miejsce", [MEDALS.get(i, str(i)) for i in range(1, len(df) + 1)])
 
@@ -65,8 +72,7 @@ with tab1:
                 return [""] * len(row)
             return [f"color: {color}; font-weight: bold"] * len(row)
 
-        styled = df.style.apply(_row_color, axis=1)
-        st.dataframe(styled, use_container_width=True, hide_index=True)
+        st.dataframe(df.style.apply(_row_color, axis=1), use_container_width=True, hide_index=True)
 
 # ── Tab 2: Kolejka 1 ──────────────────────────────────────────────────────────
 with tab2:
@@ -75,93 +81,82 @@ with tab2:
     username = st.session_state["username"]
     matches_by_day = get_matches_by_day()
     sorted_days = sorted(matches_by_day.keys())
-    day_labels = [format_day_label(d) for d in sorted_days]
 
-    subtabs = st.tabs(day_labels)
+    subtabs = st.tabs([format_day_label(d) for d in sorted_days])
 
     for subtab, day in zip(subtabs, sorted_days):
         with subtab:
             for match in matches_by_day[day]:
-                betting_open = is_betting_open(match["date"], match["time"])
-                existing_bet = get_user_bet(username, match["id"])
-                all_bets = get_match_bets(match["id"])
+                betting_open  = is_betting_open(match["date"], match["time"])
+                existing_bet  = get_user_bet(username, match["id"])
+                all_bets      = get_match_bets(match["id"])
+                kickoff       = kickoff_datetime(match["date"], match["time"])
+                cutoff_time   = (kickoff - timedelta(hours=1)).strftime("%H:%M")
 
-                kickoff = kickoff_datetime(match["date"], match["time"])
-                cutoff_time = (kickoff - timedelta(hours=1)).strftime("%H:%M")
+                # Odds: DB value overrides the static default
+                odds = get_match_odds(match["id"]) or match["odds"]
 
-                # Current available points for max-bet calculation
                 current_pts = st.session_state["points"]
-                old_amount = existing_bet["amount"] if existing_bet else 0.0
-                available = round(current_pts + old_amount, 2)
+                old_amount  = existing_bet["amount"] if existing_bet else 0.0
+                available   = round(current_pts + old_amount, 2)
                 max_allowed = available if available <= 10 else round(available * 0.5, 2)
 
                 with st.container(border=True):
-                    # Header row
-                    o = match["odds"]
+
+                    # ── Header: Team1 (odds) — Remis (odds) — Team2 (odds) ────
                     col_title, col_time = st.columns([4, 1])
                     with col_title:
                         st.markdown(
-                            f"#### {team_label(match['home'], o[0])}"
-                            f" &nbsp;vs&nbsp; "
-                            f"{team_label(match['away'], o[2])}"
-                            f" &nbsp;·&nbsp; 🤝 Remis ({o[1]:.2f})"
+                            f"#### {flag(match['home'])} {match['home']} ({odds[0]:.2f})"
+                            f" — Remis ({odds[1]:.2f}) —"
+                            f" {flag(match['away'])} {match['away']} ({odds[2]:.2f})"
                         )
                     with col_time:
                         st.markdown(f"🕐 **{match['time']}**")
 
-                    # ── Other users' bets (always visible) ───────────────────
+                    # ── Other users' bets ─────────────────────────────────────
                     other_bets = [b for b in all_bets if b["username"] != username]
                     with st.expander(f"👥 Zakłady graczy ({len(other_bets)})"):
                         if other_bets:
                             for bet in other_bets:
-                                label = outcome_label(bet["outcome"], match)
-                                st.write(f"**{bet['username']}**: {label} — {bet['amount']:.2f} pkt")
+                                st.write(
+                                    f"**{bet['username']}**: "
+                                    f"{outcome_label(bet['outcome'], match)} "
+                                    f"— {bet['amount']:.2f} pkt"
+                                )
                         else:
                             st.caption("Nikt jeszcze nie postawił zakładu.")
 
                     # ── Existing bet ──────────────────────────────────────────
                     if existing_bet:
-                        label = outcome_label(existing_bet["outcome"], match)
                         st.info(
-                            f"Twój zakład: **{label}** — **{existing_bet['amount']:.2f} pkt**"
+                            f"Twój zakład: **{outcome_label(existing_bet['outcome'], match)}**"
+                            f" — **{existing_bet['amount']:.2f} pkt**"
                         )
-
                         if betting_open:
                             with st.expander("✏️ Edytuj zakład"):
-                                _outcome_opts = {
-                                    "home":  outcome_label("home", match),
-                                    "draw":  outcome_label("draw", match),
-                                    "away":  outcome_label("away", match),
-                                }
+                                opts = outcome_opts(match, odds)
                                 with st.form(key=f"bet_{match['id']}"):
                                     new_outcome = st.radio(
                                         "Typ zakładu",
-                                        options=list(_outcome_opts.keys()),
-                                        format_func=lambda k: _outcome_opts[k],
-                                        index=list(_outcome_opts.keys()).index(
-                                            existing_bet["outcome"]
-                                        ),
+                                        options=list(opts.keys()),
+                                        format_func=lambda k: opts[k],
+                                        index=list(opts.keys()).index(existing_bet["outcome"]),
                                         horizontal=True,
                                     )
                                     new_amount = st.number_input(
                                         "Kwota (pkt)",
-                                        min_value=0.01,
-                                        max_value=float(max_allowed),
+                                        min_value=0.01, max_value=float(max_allowed),
                                         value=float(existing_bet["amount"]),
-                                        step=0.5,
-                                        format="%.2f",
+                                        step=0.5, format="%.2f",
                                     )
                                     st.caption(
-                                        f"Maks. zakład: **{max_allowed:.2f} pkt** "
+                                        f"Maks: **{max_allowed:.2f} pkt** "
                                         f"({'całe saldo' if available <= 10 else '50% salda'})"
-                                        f" | Zakłady przyjmujemy do **{cutoff_time}**"
+                                        f" | Zakłady do **{cutoff_time}**"
                                     )
-                                    if st.form_submit_button(
-                                        "💾 Zapisz zmiany", use_container_width=True
-                                    ):
-                                        ok, msg = upsert_bet(
-                                            username, match["id"], new_outcome, new_amount
-                                        )
+                                    if st.form_submit_button("💾 Zapisz zmiany", use_container_width=True):
+                                        ok, msg = upsert_bet(username, match["id"], new_outcome, new_amount)
                                         if ok:
                                             st.success(msg)
                                             refresh_points()
@@ -173,9 +168,7 @@ with tab2:
 
                     # ── Betting closed, no bet ────────────────────────────────
                     elif not betting_open:
-                        st.warning(
-                            f"🔒 Zakłady zamknięte — przyjmowaliśmy do **{cutoff_time}**"
-                        )
+                        st.warning(f"🔒 Zakłady zamknięte — przyjmowaliśmy do **{cutoff_time}**")
 
                     # ── No points ────────────────────────────────────────────
                     elif current_pts <= 0:
@@ -183,37 +176,26 @@ with tab2:
 
                     # ── New bet form ──────────────────────────────────────────
                     else:
-                        _outcome_opts = {
-                            "home": f"🏠 {match['home']} wygra",
-                            "draw": "🤝 Remis",
-                            "away": f"✈️ {match['away']} wygra",
-                        }
+                        opts = outcome_opts(match, odds)
                         with st.form(key=f"bet_{match['id']}"):
                             selected_outcome = st.radio(
                                 "Typ zakładu",
-                                options=list(_outcome_opts.keys()),
-                                format_func=lambda k: _outcome_opts[k],
+                                options=list(opts.keys()),
+                                format_func=lambda k: opts[k],
                                 horizontal=True,
                             )
                             amount = st.number_input(
                                 "Kwota (pkt)",
-                                min_value=0.01,
-                                max_value=float(max_allowed),
-                                value=1.0,
-                                step=0.5,
-                                format="%.2f",
+                                min_value=0.01, max_value=float(max_allowed),
+                                value=1.0, step=0.5, format="%.2f",
                             )
                             st.caption(
-                                f"Maks. zakład: **{max_allowed:.2f} pkt** "
+                                f"Maks: **{max_allowed:.2f} pkt** "
                                 f"({'całe saldo' if current_pts <= 10 else '50% salda'})"
-                                f" | Zakłady przyjmujemy do **{cutoff_time}**"
+                                f" | Zakłady do **{cutoff_time}**"
                             )
-                            if st.form_submit_button(
-                                "🎯 Postaw zakład", use_container_width=True
-                            ):
-                                ok, msg = upsert_bet(
-                                    username, match["id"], selected_outcome, amount
-                                )
+                            if st.form_submit_button("🎯 Postaw zakład", use_container_width=True):
+                                ok, msg = upsert_bet(username, match["id"], selected_outcome, amount)
                                 if ok:
                                     st.success(msg)
                                     refresh_points()
@@ -221,3 +203,23 @@ with tab2:
                                 else:
                                     st.error(msg)
 
+                    # ── Odds editor (any user) ────────────────────────────────
+                    with st.expander("⚙️ Ustaw kursy"):
+                        with st.form(key=f"odds_{match['id']}"):
+                            c1, c2, c3 = st.columns(3)
+                            new_home = c1.number_input(
+                                f"{flag(match['home'])} {match['home']}",
+                                min_value=1.01, value=float(odds[0]), step=0.05, format="%.2f",
+                            )
+                            new_draw = c2.number_input(
+                                "Remis",
+                                min_value=1.01, value=float(odds[1]), step=0.05, format="%.2f",
+                            )
+                            new_away = c3.number_input(
+                                f"{flag(match['away'])} {match['away']}",
+                                min_value=1.01, value=float(odds[2]), step=0.05, format="%.2f",
+                            )
+                            if st.form_submit_button("💾 Zapisz kursy", use_container_width=True):
+                                set_match_odds(match["id"], new_home, new_draw, new_away, username)
+                                st.success("Kursy zaktualizowane!")
+                                st.rerun()
