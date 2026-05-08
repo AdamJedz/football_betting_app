@@ -326,69 +326,69 @@ with tab_k3:
     _render_kolejka(KOLEJKA_3)
 
 # ── Fazy pucharowe (placeholder) ─────────────────────────────────────────────
-_COMING = "Dostępne po zakończeniu fazy grupowej (ok. 4 lipca 2026)."
+_COMING = "Drużyny zostaną ustalone po fazie grupowej. Poniżej terminarze meczów."
 
 with tab_r32:
     st.subheader("🔄 1/32 Finału")
     st.info(_COMING)
     st.markdown("""
-| Mecz | Gospodarz | Gość |
-|------|-----------|------|
-| 1/32 #1 | Do ustalenia | Do ustalenia |
-| 1/32 #2 | Do ustalenia | Do ustalenia |
-| 1/32 #3 | Do ustalenia | Do ustalenia |
-| 1/32 #4 | Do ustalenia | Do ustalenia |
-| 1/32 #5 | Do ustalenia | Do ustalenia |
-| 1/32 #6 | Do ustalenia | Do ustalenia |
-| 1/32 #7 | Do ustalenia | Do ustalenia |
-| 1/32 #8 | Do ustalenia | Do ustalenia |
-| 1/32 #9 | Do ustalenia | Do ustalenia |
-| 1/32 #10 | Do ustalenia | Do ustalenia |
-| 1/32 #11 | Do ustalenia | Do ustalenia |
-| 1/32 #12 | Do ustalenia | Do ustalenia |
-| 1/32 #13 | Do ustalenia | Do ustalenia |
-| 1/32 #14 | Do ustalenia | Do ustalenia |
-| 1/32 #15 | Do ustalenia | Do ustalenia |
-| 1/32 #16 | Do ustalenia | Do ustalenia |
+| # | Data | Godz. (CEST) | Gospodarz | Gość | Stadion |
+|---|------|--------------|-----------|------|---------|
+| 1 | 28 cze | 21:00 | Do ustalenia | Do ustalenia | SoFi Stadium, Los Angeles |
+| 2 | 29 cze | 19:00 | Do ustalenia | Do ustalenia | NRG Stadium, Houston |
+| 3 | 29 cze | 22:30 | Do ustalenia | Do ustalenia | Gillette Stadium, Boston |
+| 4 | 30 cze | 03:00 | Do ustalenia | Do ustalenia | Estadio BBVA, Monterrey |
+| 5 | 30 cze | 19:00 | Do ustalenia | Do ustalenia | AT&T Stadium, Dallas |
+| 6 | 30 cze | 23:00 | Do ustalenia | Do ustalenia | MetLife Stadium, Nowy Jork |
+| 7 | 1 lip | 03:00 | Do ustalenia | Do ustalenia | Estadio Azteca, Meksyk |
+| 8 | 1 lip | 18:00 | Do ustalenia | Do ustalenia | Mercedes-Benz Stadium, Atlanta |
+| 9 | 1 lip | 22:00 | Do ustalenia | Do ustalenia | Lumen Field, Seattle |
+| 10 | 2 lip | 02:00 | Do ustalenia | Do ustalenia | Levi's Stadium, San Francisco |
+| 11 | 2 lip | 21:00 | Do ustalenia | Do ustalenia | SoFi Stadium, Los Angeles |
+| 12 | 3 lip | 01:00 | Do ustalenia | Do ustalenia | BMO Field, Toronto |
+| 13 | 3 lip | 05:00 | Do ustalenia | Do ustalenia | BC Place, Vancouver |
+| 14 | 3 lip | 20:00 | Do ustalenia | Do ustalenia | AT&T Stadium, Dallas |
+| 15 | 4 lip | 00:00 | Do ustalenia | Do ustalenia | Hard Rock Stadium, Miami |
+| 16 | 4 lip | 03:30 | Do ustalenia | Do ustalenia | Arrowhead Stadium, Kansas City |
 """)
 
 with tab_r16:
     st.subheader("🔄 1/16 Finału")
     st.info(_COMING)
     st.markdown("""
-| Mecz | Gospodarz | Gość |
-|------|-----------|------|
-| 1/16 #1 | Do ustalenia | Do ustalenia |
-| 1/16 #2 | Do ustalenia | Do ustalenia |
-| 1/16 #3 | Do ustalenia | Do ustalenia |
-| 1/16 #4 | Do ustalenia | Do ustalenia |
-| 1/16 #5 | Do ustalenia | Do ustalenia |
-| 1/16 #6 | Do ustalenia | Do ustalenia |
-| 1/16 #7 | Do ustalenia | Do ustalenia |
-| 1/16 #8 | Do ustalenia | Do ustalenia |
+| # | Data | Godz. (CEST) | Gospodarz | Gość | Stadion |
+|---|------|--------------|-----------|------|---------|
+| 1 | 4 lip | 19:00 | Do ustalenia | Do ustalenia | NRG Stadium, Houston |
+| 2 | 4 lip | 23:00 | Do ustalenia | Do ustalenia | Lincoln Financial Field, Philadelphia |
+| 3 | 5 lip | 22:00 | Do ustalenia | Do ustalenia | MetLife Stadium, Nowy Jork |
+| 4 | 6 lip | 02:00 | Do ustalenia | Do ustalenia | Estadio Azteca, Meksyk |
+| 5 | 6 lip | 20:00 | Do ustalenia | Do ustalenia | AT&T Stadium, Dallas |
+| 6 | 7 lip | 02:00 | Do ustalenia | Do ustalenia | Lumen Field, Seattle |
+| 7 | 7 lip | 18:00 | Do ustalenia | Do ustalenia | Mercedes-Benz Stadium, Atlanta |
+| 8 | 7 lip | 22:00 | Do ustalenia | Do ustalenia | BC Place, Vancouver |
 """)
 
 with tab_qf:
     st.subheader("🏅 Ćwierćfinały")
     st.info(_COMING)
     st.markdown("""
-| Mecz | Gospodarz | Gość |
-|------|-----------|------|
-| Ćwierćfinał #1 | Do ustalenia | Do ustalenia |
-| Ćwierćfinał #2 | Do ustalenia | Do ustalenia |
-| Ćwierćfinał #3 | Do ustalenia | Do ustalenia |
-| Ćwierćfinał #4 | Do ustalenia | Do ustalenia |
+| # | Data | Godz. (CEST) | Gospodarz | Gość | Stadion |
+|---|------|--------------|-----------|------|---------|
+| 1 | 9 lip | 22:00 | Do ustalenia | Do ustalenia | Gillette Stadium, Boston |
+| 2 | 10 lip | 21:00 | Do ustalenia | Do ustalenia | SoFi Stadium, Los Angeles |
+| 3 | 11 lip | 23:00 | Do ustalenia | Do ustalenia | Hard Rock Stadium, Miami |
+| 4 | 12 lip | 03:00 | Do ustalenia | Do ustalenia | Arrowhead Stadium, Kansas City |
 """)
 
 with tab_sf:
     st.subheader("🏅 Półfinały")
     st.info(_COMING)
     st.markdown("""
-| Mecz | Gospodarz | Gość |
-|------|-----------|------|
-| Półfinał #1 | Do ustalenia | Do ustalenia |
-| Półfinał #2 | Do ustalenia | Do ustalenia |
-| Mecz o 3. miejsce | Do ustalenia | Do ustalenia |
+| Mecz | Data | Godz. (CEST) | Gospodarz | Gość | Stadion |
+|------|------|--------------|-----------|------|---------|
+| Półfinał #1 | 14 lip | 21:00 | Do ustalenia | Do ustalenia | AT&T Stadium, Dallas |
+| Półfinał #2 | 15 lip | 21:00 | Do ustalenia | Do ustalenia | Mercedes-Benz Stadium, Atlanta |
+| Mecz o 3. miejsce | 18 lip | 23:00 | Do ustalenia | Do ustalenia | Hard Rock Stadium, Miami |
 """)
 
 with tab_final:
@@ -397,8 +397,9 @@ with tab_final:
     st.markdown("""
 | | |
 |---|---|
+| **Data** | 19 lipca 2026, niedziela |
+| **Godz. (CEST)** | 21:00 |
+| **Stadion** | MetLife Stadium, New Jersey |
 | **Gospodarz** | Do ustalenia |
 | **Gość** | Do ustalenia |
-| **Data** | 29 lipca 2026 |
-| **Stadion** | MetLife Stadium, New Jersey |
 """)
