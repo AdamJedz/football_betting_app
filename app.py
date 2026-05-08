@@ -3,6 +3,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
 from auth import logout, refresh_points, require_auth
 from database import (
@@ -38,6 +39,9 @@ st.set_page_config(
     page_icon="⚽",
     layout="wide",
 )
+
+# Auto-refresh every 5 minutes so all users see live data without manual reload
+st_autorefresh(interval=5 * 60 * 1000, key="autorefresh")
 
 init_db()
 require_auth()
