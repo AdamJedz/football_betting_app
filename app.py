@@ -18,8 +18,10 @@ from database import (
     upsert_bet,
 )
 from matches import (
+    KOLEJKA_1,
+    KOLEJKA_2,
+    KOLEJKA_3,
     can_set_result,
-    flag,
     format_day_label,
     get_matches_by_day,
     is_betting_open,
@@ -47,45 +49,11 @@ with st.sidebar:
     if st.button("Wyloguj", use_container_width=True):
         logout()
 
-# --- Tabs ---
-tab1, tab2 = st.tabs(["🏆 Tabela", "⚽ Kolejka 1"])
 
-# ── Tab 1: Tabela ─────────────────────────────────────────────────────────────
-with tab1:
-    st.subheader("🏆 Tabela")
-
-    leaderboard = get_leaderboard()
-
-    if not leaderboard:
-        st.info("Brak graczy.")
-    else:
-        MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
-        df = pd.DataFrame(leaderboard).rename(columns={"username": "Gracz", "points": "Punkty"})
-        df.insert(0, "Miejsce", [MEDALS.get(i, str(i)) for i in range(1, len(df) + 1)])
-
-        def _row_color(row):
-            rank = row.name + 1
-            points = row["Punkty"]
-            if points == 0:
-                color = "#FF4444"
-            elif rank == 1:
-                color = "#FFD700"
-            elif rank == 2:
-                color = "#C0C0C0"
-            elif rank == 3:
-                color = "#CD7F32"
-            else:
-                return [""] * len(row)
-            return [f"color: {color}; font-weight: bold"] * len(row)
-
-        st.dataframe(df.style.apply(_row_color, axis=1), use_container_width=True, hide_index=True)
-
-# ── Tab 2: Kolejka 1 ──────────────────────────────────────────────────────────
-with tab2:
-    st.subheader("⚽ Kolejka 1 — MŚ 2026")
-
+# --- Kolejka renderer ---
+def _render_kolejka(matches_list: list) -> None:
     username = st.session_state["username"]
-    matches_by_day = get_matches_by_day()
+    matches_by_day = get_matches_by_day(matches_list)
     sorted_days = sorted(matches_by_day.keys())
 
     subtabs = st.tabs([format_day_label(d) for d in sorted_days])
@@ -93,13 +61,12 @@ with tab2:
     for subtab, day in zip(subtabs, sorted_days):
         with subtab:
             for match in matches_by_day[day]:
-                betting_open  = is_betting_open(match["date"], match["time"])
-                existing_bet  = get_user_bet(username, match["id"])
-                all_bets      = get_match_bets(match["id"])
-                kickoff       = kickoff_datetime(match["date"], match["time"])
-                cutoff_time   = (kickoff - timedelta(hours=1)).strftime("%H:%M")
+                betting_open = is_betting_open(match["date"], match["time"])
+                existing_bet = get_user_bet(username, match["id"])
+                all_bets     = get_match_bets(match["id"])
+                kickoff      = kickoff_datetime(match["date"], match["time"])
+                cutoff_time  = (kickoff - timedelta(hours=1)).strftime("%H:%M")
 
-                # Odds: DB value overrides the static default
                 odds = get_match_odds(match["id"]) or match["odds"]
 
                 current_pts = st.session_state["points"]
@@ -109,13 +76,13 @@ with tab2:
 
                 with st.container(border=True):
 
-                    # ── Header: Team1 (odds) — Remis (odds) — Team2 (odds) ────
+                    # ── Header ────────────────────────────────────────────────
                     col_title, col_time = st.columns([4, 1])
                     with col_title:
                         st.markdown(
-                            f"#### {flag(match['home'])} {match['home']} ({odds[0]:.2f})"
+                            f"#### {match['home']} ({odds[0]:.2f})"
                             f" — Remis ({odds[1]:.2f}) —"
-                            f" {flag(match['away'])} {match['away']} ({odds[2]:.2f})"
+                            f" {match['away']} ({odds[2]:.2f})"
                         )
                     with col_time:
                         st.markdown(f"🕐 **{match['time']}**")
@@ -209,12 +176,12 @@ with tab2:
                                 else:
                                     st.error(msg)
 
-                    # ── Odds editor (any user) ────────────────────────────────
+                    # ── Odds editor ───────────────────────────────────────────
                     with st.expander("⚙️ Ustaw kursy"):
                         with st.form(key=f"odds_{match['id']}"):
                             c1, c2, c3 = st.columns(3)
                             new_home = c1.number_input(
-                                f"{flag(match['home'])} {match['home']}",
+                                match["home"],
                                 min_value=1.01, value=float(odds[0]), step=0.05, format="%.2f",
                             )
                             new_draw = c2.number_input(
@@ -222,7 +189,7 @@ with tab2:
                                 min_value=1.01, value=float(odds[1]), step=0.05, format="%.2f",
                             )
                             new_away = c3.number_input(
-                                f"{flag(match['away'])} {match['away']}",
+                                match["away"],
                                 min_value=1.01, value=float(odds[2]), step=0.05, format="%.2f",
                             )
                             if st.form_submit_button("💾 Zapisz kursy", use_container_width=True):
@@ -240,14 +207,14 @@ with tab2:
                                 f"Wynik: **{outcome_label(match_result['result'], match)}** "
                                 f"— ustawił {match_result['set_by']}"
                             )
-                            # Payout summary
                             paid = [b for b in all_bets if b.get("payout")]
                             if paid:
                                 st.markdown("**Wypłaty:**")
                                 for b in paid:
                                     st.write(
-                                        f"  {flag(match['home'] if b['outcome']=='home' else match['away']) if b['outcome']!='draw' else '🤝'} "
-                                        f"**{b['username']}**: +{b['payout']:.2f} pkt"
+                                        f"**{b['username']}** "
+                                        f"({outcome_label(b['outcome'], match)}): "
+                                        f"+{b['payout']:.2f} pkt"
                                     )
 
                         if user_can_set:
@@ -299,3 +266,139 @@ with tab2:
                             else:
                                 mins = max(0, int((unlock - now_w).total_seconds() / 60))
                                 st.caption(f"⏳ Dostępne za ~{mins} min (2h po starcie)")
+
+
+# --- Tabs ---
+(tab_tabela, tab_k1, tab_k2, tab_k3,
+ tab_r32, tab_r16, tab_qf, tab_sf, tab_final) = st.tabs([
+    "🏆 Tabela",
+    "⚽ Kolejka 1",
+    "⚽ Kolejka 2",
+    "⚽ Kolejka 3",
+    "🔄 1/32 Finału",
+    "🔄 1/16 Finału",
+    "🏅 Ćwierćfinały",
+    "🏅 Półfinały",
+    "🏆 Finał",
+])
+
+# ── Tabela ────────────────────────────────────────────────────────────────────
+with tab_tabela:
+    st.subheader("🏆 Tabela")
+
+    leaderboard = get_leaderboard()
+
+    if not leaderboard:
+        st.info("Brak graczy.")
+    else:
+        MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
+        df = pd.DataFrame(leaderboard).rename(columns={"username": "Gracz", "points": "Punkty"})
+        df.insert(0, "Miejsce", [MEDALS.get(i, str(i)) for i in range(1, len(df) + 1)])
+
+        def _row_color(row):
+            rank = row.name + 1
+            points = row["Punkty"]
+            if points == 0:
+                color = "#FF4444"
+            elif rank == 1:
+                color = "#FFD700"
+            elif rank == 2:
+                color = "#C0C0C0"
+            elif rank == 3:
+                color = "#CD7F32"
+            else:
+                return [""] * len(row)
+            return [f"color: {color}; font-weight: bold"] * len(row)
+
+        st.dataframe(df.style.apply(_row_color, axis=1), use_container_width=True, hide_index=True)
+
+# ── Kolejki ───────────────────────────────────────────────────────────────────
+with tab_k1:
+    st.subheader("⚽ Kolejka 1 — MŚ 2026")
+    _render_kolejka(KOLEJKA_1)
+
+with tab_k2:
+    st.subheader("⚽ Kolejka 2 — MŚ 2026")
+    _render_kolejka(KOLEJKA_2)
+
+with tab_k3:
+    st.subheader("⚽ Kolejka 3 — MŚ 2026")
+    _render_kolejka(KOLEJKA_3)
+
+# ── Fazy pucharowe (placeholder) ─────────────────────────────────────────────
+_COMING = "Dostępne po zakończeniu fazy grupowej (ok. 4 lipca 2026)."
+
+with tab_r32:
+    st.subheader("🔄 1/32 Finału")
+    st.info(_COMING)
+    st.markdown("""
+| Mecz | Gospodarz | Gość |
+|------|-----------|------|
+| 1/32 #1 | Do ustalenia | Do ustalenia |
+| 1/32 #2 | Do ustalenia | Do ustalenia |
+| 1/32 #3 | Do ustalenia | Do ustalenia |
+| 1/32 #4 | Do ustalenia | Do ustalenia |
+| 1/32 #5 | Do ustalenia | Do ustalenia |
+| 1/32 #6 | Do ustalenia | Do ustalenia |
+| 1/32 #7 | Do ustalenia | Do ustalenia |
+| 1/32 #8 | Do ustalenia | Do ustalenia |
+| 1/32 #9 | Do ustalenia | Do ustalenia |
+| 1/32 #10 | Do ustalenia | Do ustalenia |
+| 1/32 #11 | Do ustalenia | Do ustalenia |
+| 1/32 #12 | Do ustalenia | Do ustalenia |
+| 1/32 #13 | Do ustalenia | Do ustalenia |
+| 1/32 #14 | Do ustalenia | Do ustalenia |
+| 1/32 #15 | Do ustalenia | Do ustalenia |
+| 1/32 #16 | Do ustalenia | Do ustalenia |
+""")
+
+with tab_r16:
+    st.subheader("🔄 1/16 Finału")
+    st.info(_COMING)
+    st.markdown("""
+| Mecz | Gospodarz | Gość |
+|------|-----------|------|
+| 1/16 #1 | Do ustalenia | Do ustalenia |
+| 1/16 #2 | Do ustalenia | Do ustalenia |
+| 1/16 #3 | Do ustalenia | Do ustalenia |
+| 1/16 #4 | Do ustalenia | Do ustalenia |
+| 1/16 #5 | Do ustalenia | Do ustalenia |
+| 1/16 #6 | Do ustalenia | Do ustalenia |
+| 1/16 #7 | Do ustalenia | Do ustalenia |
+| 1/16 #8 | Do ustalenia | Do ustalenia |
+""")
+
+with tab_qf:
+    st.subheader("🏅 Ćwierćfinały")
+    st.info(_COMING)
+    st.markdown("""
+| Mecz | Gospodarz | Gość |
+|------|-----------|------|
+| Ćwierćfinał #1 | Do ustalenia | Do ustalenia |
+| Ćwierćfinał #2 | Do ustalenia | Do ustalenia |
+| Ćwierćfinał #3 | Do ustalenia | Do ustalenia |
+| Ćwierćfinał #4 | Do ustalenia | Do ustalenia |
+""")
+
+with tab_sf:
+    st.subheader("🏅 Półfinały")
+    st.info(_COMING)
+    st.markdown("""
+| Mecz | Gospodarz | Gość |
+|------|-----------|------|
+| Półfinał #1 | Do ustalenia | Do ustalenia |
+| Półfinał #2 | Do ustalenia | Do ustalenia |
+| Mecz o 3. miejsce | Do ustalenia | Do ustalenia |
+""")
+
+with tab_final:
+    st.subheader("🏆 Finał")
+    st.info(_COMING)
+    st.markdown("""
+| | |
+|---|---|
+| **Gospodarz** | Do ustalenia |
+| **Gość** | Do ustalenia |
+| **Data** | 29 lipca 2026 |
+| **Stadion** | MetLife Stadium, New Jersey |
+""")
