@@ -1,104 +1,105 @@
-import sqlite3
-from pathlib import Path
+import os
 
 import bcrypt
+import psycopg2
+import psycopg2.extras
 
-DB_PATH = Path("data/app.db")
+try:
+    import streamlit as st
+    _secrets = st.secrets
+except Exception:
+    _secrets = {}
 
 
-def get_connection() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
+def get_connection() -> psycopg2.extensions.connection:
+    url = (
+        (getattr(_secrets, "get", lambda k, d=None: d)("DATABASE_URL"))
+        or os.environ.get("DATABASE_URL")
+    )
+    if not url:
+        raise RuntimeError("DATABASE_URL not set. Add it to .streamlit/secrets.toml or environment.")
+    conn = psycopg2.connect(url, cursor_factory=psycopg2.extras.RealDictCursor)
     return conn
 
 
 def init_db() -> None:
     with get_connection() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                username      TEXT    UNIQUE NOT NULL,
-                password_hash TEXT    NOT NULL,
-                points        REAL    NOT NULL DEFAULT 100,
-                created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        # Migrate bets table if old schema (home_pts/draw_pts/away_pts) is present
-        try:
-            conn.execute("SELECT outcome FROM bets LIMIT 1")
-        except sqlite3.OperationalError:
-            conn.execute("DROP TABLE IF EXISTS bets")
-            conn.execute("""
-                CREATE TABLE bets (
-                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                    username   TEXT    NOT NULL,
-                    match_id   TEXT    NOT NULL,
-                    outcome    TEXT    NOT NULL CHECK(outcome IN ('home', 'draw', 'away')),
-                    amount     REAL    NOT NULL,
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id            SERIAL PRIMARY KEY,
+                    username      TEXT UNIQUE NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    points        REAL NOT NULL DEFAULT 100,
+                    created_at    TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS bets (
+                    id         SERIAL PRIMARY KEY,
+                    username   TEXT NOT NULL,
+                    match_id   TEXT NOT NULL,
+                    outcome    TEXT NOT NULL CHECK(outcome IN ('home', 'draw', 'away')),
+                    amount     REAL NOT NULL,
                     payout     REAL,
-                    placed_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    placed_at  TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW(),
                     UNIQUE(username, match_id)
                 )
             """)
-        # Add payout column if missing (migration for existing DBs)
-        try:
-            conn.execute("SELECT payout FROM bets LIMIT 1")
-        except sqlite3.OperationalError:
-            conn.execute("ALTER TABLE bets ADD COLUMN payout REAL")
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS match_odds (
-                match_id   TEXT PRIMARY KEY,
-                home_odds  REAL NOT NULL,
-                draw_odds  REAL NOT NULL,
-                away_odds  REAL NOT NULL,
-                updated_by TEXT,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS match_results (
-                match_id   TEXT PRIMARY KEY,
-                result     TEXT NOT NULL CHECK(result IN ('home', 'draw', 'away')),
-                set_by     TEXT NOT NULL,
-                set_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS audit_log (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                action_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                action_type TEXT      NOT NULL,
-                username    TEXT      NOT NULL,
-                details     TEXT
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS points_snapshots (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                username    TEXT    NOT NULL,
-                points      REAL    NOT NULL,
-                match_id    TEXT,
-                recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS match_odds (
+                    match_id   TEXT PRIMARY KEY,
+                    home_odds  REAL NOT NULL,
+                    draw_odds  REAL NOT NULL,
+                    away_odds  REAL NOT NULL,
+                    updated_by TEXT,
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS match_results (
+                    match_id TEXT PRIMARY KEY,
+                    result   TEXT NOT NULL CHECK(result IN ('home', 'draw', 'away')),
+                    set_by   TEXT NOT NULL,
+                    set_at   TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    id          SERIAL PRIMARY KEY,
+                    action_at   TIMESTAMP DEFAULT NOW(),
+                    action_type TEXT NOT NULL,
+                    username    TEXT NOT NULL,
+                    details     TEXT
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS points_snapshots (
+                    id          SERIAL PRIMARY KEY,
+                    username    TEXT NOT NULL,
+                    points      REAL NOT NULL,
+                    match_id    TEXT,
+                    recorded_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
         conn.commit()
 
 
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
-def _log(conn, username: str, action_type: str, details: str) -> None:
-    conn.execute(
-        "INSERT INTO audit_log (username, action_type, details) VALUES (?, ?, ?)",
+def _log(cur, username: str, action_type: str, details: str) -> None:
+    cur.execute(
+        "INSERT INTO audit_log (username, action_type, details) VALUES (%s, %s, %s)",
         (username, action_type, details),
     )
 
 
-def _snapshot(conn, match_id: str) -> None:
-    users = conn.execute("SELECT username, points FROM users").fetchall()
-    conn.executemany(
-        "INSERT INTO points_snapshots (username, points, match_id) VALUES (?, ?, ?)",
+def _snapshot(cur, match_id: str) -> None:
+    cur.execute("SELECT username, points FROM users")
+    users = cur.fetchall()
+    cur.executemany(
+        "INSERT INTO points_snapshots (username, points, match_id) VALUES (%s, %s, %s)",
         [(u["username"], round(u["points"], 2), match_id) for u in users],
     )
 
@@ -107,10 +108,12 @@ def _snapshot(conn, match_id: str) -> None:
 
 def get_match_odds(match_id: str) -> tuple[float, float, float] | None:
     with get_connection() as conn:
-        row = conn.execute(
-            "SELECT home_odds, draw_odds, away_odds FROM match_odds WHERE match_id = ?",
-            (match_id,),
-        ).fetchone()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT home_odds, draw_odds, away_odds FROM match_odds WHERE match_id = %s",
+                (match_id,),
+            )
+            row = cur.fetchone()
     return (row["home_odds"], row["draw_odds"], row["away_odds"]) if row else None
 
 
@@ -118,19 +121,20 @@ def set_match_odds(
     match_id: str, home: float, draw: float, away: float, username: str
 ) -> None:
     with get_connection() as conn:
-        conn.execute(
-            """INSERT INTO match_odds (match_id, home_odds, draw_odds, away_odds, updated_by, updated_at)
-               VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-               ON CONFLICT(match_id) DO UPDATE SET
-                   home_odds  = excluded.home_odds,
-                   draw_odds  = excluded.draw_odds,
-                   away_odds  = excluded.away_odds,
-                   updated_by = excluded.updated_by,
-                   updated_at = CURRENT_TIMESTAMP""",
-            (match_id, round(home, 2), round(draw, 2), round(away, 2), username),
-        )
-        _log(conn, username, "kursy",
-             f"{match_id}: {home:.2f} / {draw:.2f} / {away:.2f}")
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO match_odds (match_id, home_odds, draw_odds, away_odds, updated_by, updated_at)
+                   VALUES (%s, %s, %s, %s, %s, NOW())
+                   ON CONFLICT (match_id) DO UPDATE SET
+                       home_odds  = EXCLUDED.home_odds,
+                       draw_odds  = EXCLUDED.draw_odds,
+                       away_odds  = EXCLUDED.away_odds,
+                       updated_by = EXCLUDED.updated_by,
+                       updated_at = NOW()""",
+                (match_id, round(home, 2), round(draw, 2), round(away, 2), username),
+            )
+            _log(cur, username, "kursy",
+                 f"{match_id}: {home:.2f} / {draw:.2f} / {away:.2f}")
         conn.commit()
 
 
@@ -140,22 +144,25 @@ def create_user(username: str, password: str, points: int = 100) -> bool:
     password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
     try:
         with get_connection() as conn:
-            conn.execute(
-                "INSERT INTO users (username, password_hash, points) VALUES (?, ?, ?)",
-                (username, password_hash, points),
-            )
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO users (username, password_hash, points) VALUES (%s, %s, %s)",
+                    (username, password_hash, points),
+                )
             conn.commit()
         return True
-    except sqlite3.IntegrityError:
+    except psycopg2.errors.UniqueViolation:
         return False
 
 
 def verify_user(username: str, password: str) -> dict | None:
     with get_connection() as conn:
-        row = conn.execute(
-            "SELECT password_hash, points FROM users WHERE username = ?",
-            (username,),
-        ).fetchone()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT password_hash, points FROM users WHERE username = %s",
+                (username,),
+            )
+            row = cur.fetchone()
     if row and bcrypt.checkpw(password.encode(), row["password_hash"].encode()):
         return {"username": username, "points": row["points"]}
     return None
@@ -163,23 +170,25 @@ def verify_user(username: str, password: str) -> dict | None:
 
 def get_user(username: str) -> dict | None:
     with get_connection() as conn:
-        row = conn.execute(
-            "SELECT username, points FROM users WHERE username = ?",
-            (username,),
-        ).fetchone()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT username, points FROM users WHERE username = %s",
+                (username,),
+            )
+            row = cur.fetchone()
     return dict(row) if row else None
 
 
 def update_points(username: str, delta: float) -> float:
     with get_connection() as conn:
-        conn.execute(
-            "UPDATE users SET points = ROUND(points + ?, 2) WHERE username = ?",
-            (delta, username),
-        )
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE users SET points = ROUND((points + %s)::numeric, 2) WHERE username = %s",
+                (delta, username),
+            )
+            cur.execute("SELECT points FROM users WHERE username = %s", (username,))
+            row = cur.fetchone()
         conn.commit()
-        row = conn.execute(
-            "SELECT points FROM users WHERE username = ?", (username,)
-        ).fetchone()
     return row["points"] if row else 0
 
 
@@ -199,58 +208,59 @@ def upsert_bet(
         return False, "Nieprawidłowy typ zakładu."
 
     with get_connection() as conn:
-        user = conn.execute(
-            "SELECT points FROM users WHERE username = ?", (username,)
-        ).fetchone()
-        if not user:
-            return False, "Użytkownik nie istnieje."
+        with conn.cursor() as cur:
+            cur.execute("SELECT points FROM users WHERE username = %s", (username,))
+            user = cur.fetchone()
+            if not user:
+                return False, "Użytkownik nie istnieje."
 
-        current_pts = round(user["points"], 2)
-        existing = conn.execute(
-            "SELECT amount FROM bets WHERE username = ? AND match_id = ?",
-            (username, match_id),
-        ).fetchone()
-        old_amount = round(existing["amount"], 2) if existing else 0.0
+            current_pts = round(user["points"], 2)
+            cur.execute(
+                "SELECT amount FROM bets WHERE username = %s AND match_id = %s",
+                (username, match_id),
+            )
+            existing = cur.fetchone()
+            old_amount = round(existing["amount"], 2) if existing else 0.0
 
-        available = round(current_pts + old_amount, 2)
-        max_allowed = available if available <= 10 else round(available * 0.5, 2)
+            available = round(current_pts + old_amount, 2)
+            max_allowed = available if available <= 10 else round(available * 0.5, 2)
 
-        if amount > max_allowed:
-            if available <= 10:
-                return False, f"Za mało punktów. Masz dostępne {available:.2f} pkt."
-            return False, (
-                f"Maksymalny zakład to {max_allowed:.2f} pkt "
-                f"(50% z {available:.2f} pkt)."
-            )
+            if amount > max_allowed:
+                if available <= 10:
+                    return False, f"Za mało punktów. Masz dostępne {available:.2f} pkt."
+                return False, (
+                    f"Maksymalny zakład to {max_allowed:.2f} pkt "
+                    f"(50% z {available:.2f} pkt)."
+                )
 
-        if existing:
-            conn.execute(
-                "UPDATE bets SET outcome = ?, amount = ?, updated_at = CURRENT_TIMESTAMP "
-                "WHERE username = ? AND match_id = ?",
-                (outcome, amount, username, match_id),
-            )
-            net = round(amount - old_amount, 2)
-            conn.execute(
-                "UPDATE users SET points = ROUND(points - ?, 2) WHERE username = ?",
-                (net, username),
-            )
-            _log(conn, username, "edycja zakładu",
-                 f"{match_id}: {outcome}, {amount:.2f} pkt (poprzednio {old_amount:.2f} pkt)")
-            msg = (f"Zakład zaktualizowany! Odjęto dodatkowe {net:.2f} pkt."
-                   if net >= 0 else
-                   f"Zakład zaktualizowany! Zwrócono {abs(net):.2f} pkt.")
-        else:
-            conn.execute(
-                "INSERT INTO bets (username, match_id, outcome, amount) VALUES (?, ?, ?, ?)",
-                (username, match_id, outcome, amount),
-            )
-            conn.execute(
-                "UPDATE users SET points = ROUND(points - ?, 2) WHERE username = ?",
-                (amount, username),
-            )
-            _log(conn, username, "zakład",
-                 f"{match_id}: {outcome}, {amount:.2f} pkt")
-            msg = f"Zakład przyjęty! Odjęto {amount:.2f} pkt."
+            if existing:
+                cur.execute(
+                    "UPDATE bets SET outcome = %s, amount = %s, updated_at = NOW() "
+                    "WHERE username = %s AND match_id = %s",
+                    (outcome, amount, username, match_id),
+                )
+                net = round(amount - old_amount, 2)
+                cur.execute(
+                    "UPDATE users SET points = ROUND((points - %s)::numeric, 2) WHERE username = %s",
+                    (net, username),
+                )
+                _log(cur, username, "edycja zakładu",
+                     f"{match_id}: {outcome}, {amount:.2f} pkt (poprzednio {old_amount:.2f} pkt)")
+                msg = (f"Zakład zaktualizowany! Odjęto dodatkowe {net:.2f} pkt."
+                       if net >= 0 else
+                       f"Zakład zaktualizowany! Zwrócono {abs(net):.2f} pkt.")
+            else:
+                cur.execute(
+                    "INSERT INTO bets (username, match_id, outcome, amount) VALUES (%s, %s, %s, %s)",
+                    (username, match_id, outcome, amount),
+                )
+                cur.execute(
+                    "UPDATE users SET points = ROUND((points - %s)::numeric, 2) WHERE username = %s",
+                    (amount, username),
+                )
+                _log(cur, username, "zakład",
+                     f"{match_id}: {outcome}, {amount:.2f} pkt")
+                msg = f"Zakład przyjęty! Odjęto {amount:.2f} pkt."
 
         conn.commit()
 
@@ -259,19 +269,24 @@ def upsert_bet(
 
 def get_user_bet(username: str, match_id: str) -> dict | None:
     with get_connection() as conn:
-        row = conn.execute(
-            "SELECT outcome, amount FROM bets WHERE username = ? AND match_id = ?",
-            (username, match_id),
-        ).fetchone()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT outcome, amount FROM bets WHERE username = %s AND match_id = %s",
+                (username, match_id),
+            )
+            row = cur.fetchone()
     return dict(row) if row else None
 
 
 def get_match_bets(match_id: str) -> list[dict]:
     with get_connection() as conn:
-        rows = conn.execute(
-            "SELECT username, outcome, amount, payout FROM bets WHERE match_id = ? ORDER BY placed_at",
-            (match_id,),
-        ).fetchall()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT username, outcome, amount, payout FROM bets "
+                "WHERE match_id = %s ORDER BY placed_at",
+                (match_id,),
+            )
+            rows = cur.fetchall()
     return [dict(r) for r in rows]
 
 
@@ -279,10 +294,12 @@ def get_match_bets(match_id: str) -> list[dict]:
 
 def get_match_result(match_id: str) -> dict | None:
     with get_connection() as conn:
-        row = conn.execute(
-            "SELECT result, set_by, set_at FROM match_results WHERE match_id = ?",
-            (match_id,),
-        ).fetchone()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT result, set_by, set_at FROM match_results WHERE match_id = %s",
+                (match_id,),
+            )
+            row = cur.fetchone()
     return dict(row) if row else None
 
 
@@ -295,54 +312,62 @@ def set_match_result(
     odds_map = {"home": odds[0], "draw": odds[1], "away": odds[2]}
 
     with get_connection() as conn:
-        existing = conn.execute(
-            "SELECT result FROM match_results WHERE match_id = ?", (match_id,)
-        ).fetchone()
-
-        # Revert any existing payouts
-        paid_bets = conn.execute(
-            "SELECT username, payout FROM bets WHERE match_id = ? AND payout IS NOT NULL",
-            (match_id,),
-        ).fetchall()
-        for b in paid_bets:
-            conn.execute(
-                "UPDATE users SET points = ROUND(points - ?, 2) WHERE username = ?",
-                (b["payout"], b["username"]),
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT result FROM match_results WHERE match_id = %s", (match_id,)
             )
-        conn.execute("UPDATE bets SET payout = NULL WHERE match_id = ?", (match_id,))
+            existing = cur.fetchone()
 
-        # Upsert result
-        if existing:
-            conn.execute(
-                "UPDATE match_results SET result=?, set_by=?, set_at=CURRENT_TIMESTAMP WHERE match_id=?",
-                (result, setter, match_id),
+            # Revert any existing payouts
+            cur.execute(
+                "SELECT username, payout FROM bets "
+                "WHERE match_id = %s AND payout IS NOT NULL",
+                (match_id,),
             )
-        else:
-            conn.execute(
-                "INSERT INTO match_results (match_id, result, set_by) VALUES (?, ?, ?)",
-                (match_id, result, setter),
-            )
+            paid_bets = cur.fetchall()
+            for b in paid_bets:
+                cur.execute(
+                    "UPDATE users SET points = ROUND((points - %s)::numeric, 2) WHERE username = %s",
+                    (b["payout"], b["username"]),
+                )
+            cur.execute("UPDATE bets SET payout = NULL WHERE match_id = %s", (match_id,))
 
-        # Pay out winning bets
-        winning_bets = conn.execute(
-            "SELECT id, username, amount FROM bets WHERE match_id = ? AND outcome = ?",
-            (match_id, result),
-        ).fetchall()
-        winning_odds = odds_map[result]
-        payout_count = 0
-        for b in winning_bets:
-            payout = round(b["amount"] * winning_odds, 2)
-            conn.execute("UPDATE bets SET payout = ? WHERE id = ?", (payout, b["id"]))
-            conn.execute(
-                "UPDATE users SET points = ROUND(points + ?, 2) WHERE username = ?",
-                (payout, b["username"]),
-            )
-            payout_count += 1
+            # Upsert result
+            if existing:
+                cur.execute(
+                    "UPDATE match_results SET result=%s, set_by=%s, set_at=NOW() "
+                    "WHERE match_id=%s",
+                    (result, setter, match_id),
+                )
+            else:
+                cur.execute(
+                    "INSERT INTO match_results (match_id, result, set_by) VALUES (%s, %s, %s)",
+                    (match_id, result, setter),
+                )
 
-        action = "zaktualizowany" if existing else "zapisany"
-        _log(conn, setter, "wynik",
-             f"{match_id}: {result}, kurs {winning_odds:.2f}, wypłaty dla {payout_count} graczy")
-        _snapshot(conn, match_id)
+            # Pay out winning bets
+            cur.execute(
+                "SELECT id, username, amount FROM bets "
+                "WHERE match_id = %s AND outcome = %s",
+                (match_id, result),
+            )
+            winning_bets = cur.fetchall()
+            winning_odds = odds_map[result]
+            payout_count = 0
+            for b in winning_bets:
+                payout = round(b["amount"] * winning_odds, 2)
+                cur.execute("UPDATE bets SET payout = %s WHERE id = %s", (payout, b["id"]))
+                cur.execute(
+                    "UPDATE users SET points = ROUND((points + %s)::numeric, 2) WHERE username = %s",
+                    (payout, b["username"]),
+                )
+                payout_count += 1
+
+            action = "zaktualizowany" if existing else "zapisany"
+            _log(cur, setter, "wynik",
+                 f"{match_id}: {result}, kurs {winning_odds:.2f}, wypłaty dla {payout_count} graczy")
+            _snapshot(cur, match_id)
+
         conn.commit()
 
     return True, f"Wynik {action}! Wypłacono punkty dla {payout_count} graczy."
@@ -350,27 +375,31 @@ def set_match_result(
 
 def clear_match_result(match_id: str, username: str = "system") -> tuple[bool, str]:
     with get_connection() as conn:
-        existing = conn.execute(
-            "SELECT result FROM match_results WHERE match_id = ?", (match_id,)
-        ).fetchone()
-        if not existing:
-            return False, "Brak zapisanego wyniku."
-
-        paid_bets = conn.execute(
-            "SELECT username, payout FROM bets WHERE match_id = ? AND payout IS NOT NULL",
-            (match_id,),
-        ).fetchall()
-        for b in paid_bets:
-            conn.execute(
-                "UPDATE users SET points = ROUND(points - ?, 2) WHERE username = ?",
-                (b["payout"], b["username"]),
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT result FROM match_results WHERE match_id = %s", (match_id,)
             )
-        conn.execute("UPDATE bets SET payout = NULL WHERE match_id = ?", (match_id,))
-        conn.execute("DELETE FROM match_results WHERE match_id = ?", (match_id,))
+            if not cur.fetchone():
+                return False, "Brak zapisanego wyniku."
 
-        _log(conn, username, "cofnięcie wyniku",
-             f"{match_id}: przywrócono punkty dla {len(paid_bets)} graczy")
-        _snapshot(conn, match_id)
+            cur.execute(
+                "SELECT username, payout FROM bets "
+                "WHERE match_id = %s AND payout IS NOT NULL",
+                (match_id,),
+            )
+            paid_bets = cur.fetchall()
+            for b in paid_bets:
+                cur.execute(
+                    "UPDATE users SET points = ROUND((points - %s)::numeric, 2) WHERE username = %s",
+                    (b["payout"], b["username"]),
+                )
+            cur.execute("UPDATE bets SET payout = NULL WHERE match_id = %s", (match_id,))
+            cur.execute("DELETE FROM match_results WHERE match_id = %s", (match_id,))
+
+            _log(cur, username, "cofnięcie wyniku",
+                 f"{match_id}: przywrócono punkty dla {len(paid_bets)} graczy")
+            _snapshot(cur, match_id)
+
         conn.commit()
 
     return True, f"Wynik cofnięty, przywrócono punkty dla {len(paid_bets)} graczy."
@@ -380,9 +409,9 @@ def clear_match_result(match_id: str, username: str = "system") -> tuple[bool, s
 
 def get_leaderboard() -> list[dict]:
     with get_connection() as conn:
-        rows = conn.execute(
-            "SELECT username, points FROM users ORDER BY points DESC"
-        ).fetchall()
+        with conn.cursor() as cur:
+            cur.execute("SELECT username, points FROM users ORDER BY points DESC")
+            rows = cur.fetchall()
     return [dict(r) for r in rows]
 
 
@@ -390,29 +419,33 @@ def get_leaderboard() -> list[dict]:
 
 def get_audit_log(limit: int = 500) -> list[dict]:
     with get_connection() as conn:
-        rows = conn.execute(
-            """SELECT action_at, action_type, username, details
-               FROM audit_log ORDER BY action_at DESC LIMIT ?""",
-            (limit,),
-        ).fetchall()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT action_at, action_type, username, details "
+                "FROM audit_log ORDER BY action_at DESC LIMIT %s",
+                (limit,),
+            )
+            rows = cur.fetchall()
     return [dict(r) for r in rows]
 
 
 # ── Points history ─────────────────────────────────────────────────────────────
 
 def get_points_history() -> list[dict]:
-    """Last snapshot per user per calendar day (Warsaw time)."""
+    """Last snapshot per user per calendar day (server time)."""
     with get_connection() as conn:
-        rows = conn.execute("""
-            SELECT username,
-                   DATE(recorded_at, 'localtime') AS day,
-                   points
-            FROM   points_snapshots
-            WHERE  id IN (
-                SELECT MAX(id)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT username,
+                       DATE(recorded_at) AS day,
+                       points
                 FROM   points_snapshots
-                GROUP  BY username, DATE(recorded_at, 'localtime')
-            )
-            ORDER  BY day, username
-        """).fetchall()
+                WHERE  id IN (
+                    SELECT MAX(id)
+                    FROM   points_snapshots
+                    GROUP  BY username, DATE(recorded_at)
+                )
+                ORDER  BY day, username
+            """)
+            rows = cur.fetchall()
     return [dict(r) for r in rows]

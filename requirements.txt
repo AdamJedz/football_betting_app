@@ -3,3 +3,4 @@ bcrypt>=4.1.0
 pandas>=2.0.0
 plotly>=5.0.0
 streamlit-autorefresh>=1.0.1
+psycopg2-binary>=2.9.0
