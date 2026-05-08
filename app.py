@@ -4,12 +4,13 @@ import pandas as pd
 import streamlit as st
 
 from auth import logout, refresh_points, require_auth
-from database import get_leaderboard, get_user_bet, init_db, place_bet
+from database import get_leaderboard, get_match_bets, get_user_bet, init_db, upsert_bet
 from matches import (
     format_day_label,
     get_matches_by_day,
     is_betting_open,
     kickoff_datetime,
+    outcome_label,
 )
 
 st.set_page_config(
@@ -81,60 +82,133 @@ with tab2:
             for match in matches_by_day[day]:
                 betting_open = is_betting_open(match["date"], match["time"])
                 existing_bet = get_user_bet(username, match["id"])
+                all_bets = get_match_bets(match["id"])
+
                 kickoff = kickoff_datetime(match["date"], match["time"])
+                cutoff_time = (kickoff - timedelta(hours=1)).strftime("%H:%M")
+
+                # Current available points for max-bet calculation
+                current_pts = st.session_state["points"]
+                old_amount = existing_bet["amount"] if existing_bet else 0.0
+                available = round(current_pts + old_amount, 2)
+                max_allowed = available if available <= 10 else round(available * 0.5, 2)
 
                 with st.container(border=True):
-                    col_title, col_time = st.columns([3, 1])
+                    # Header row
+                    col_title, col_time = st.columns([4, 1])
                     with col_title:
                         st.markdown(f"#### {match['home']} vs {match['away']}")
                     with col_time:
-                        st.markdown(f"🕐 **{match['time']}** (PL)")
+                        st.markdown(f"🕐 **{match['time']}**")
 
+                    # ── Existing bet ──────────────────────────────────────────
                     if existing_bet:
-                        c1, c2, c3 = st.columns(3)
-                        c1.metric(f"🏠 {match['home']}", f"{existing_bet['home_pts']:.2f} pkt")
-                        c2.metric("🤝 Remis", f"{existing_bet['draw_pts']:.2f} pkt")
-                        c3.metric(f"✈️ {match['away']}", f"{existing_bet['away_pts']:.2f} pkt")
-                        st.success(f"✅ Zakład złożony — łącznie **{existing_bet['total_pts']:.2f} pkt**")
+                        label = outcome_label(existing_bet["outcome"], match)
+                        st.info(
+                            f"Twój zakład: **{label}** — **{existing_bet['amount']:.2f} pkt**"
+                        )
 
+                        if betting_open:
+                            with st.expander("✏️ Edytuj zakład"):
+                                _outcome_opts = {
+                                    "home": f"🏠 {match['home']} wygra",
+                                    "draw": "🤝 Remis",
+                                    "away": f"✈️ {match['away']} wygra",
+                                }
+                                with st.form(key=f"bet_{match['id']}"):
+                                    new_outcome = st.radio(
+                                        "Typ zakładu",
+                                        options=list(_outcome_opts.keys()),
+                                        format_func=lambda k: _outcome_opts[k],
+                                        index=list(_outcome_opts.keys()).index(
+                                            existing_bet["outcome"]
+                                        ),
+                                        horizontal=True,
+                                    )
+                                    new_amount = st.number_input(
+                                        "Kwota (pkt)",
+                                        min_value=0.01,
+                                        max_value=float(max_allowed),
+                                        value=float(existing_bet["amount"]),
+                                        step=0.5,
+                                        format="%.2f",
+                                    )
+                                    st.caption(
+                                        f"Maks. zakład: **{max_allowed:.2f} pkt** "
+                                        f"({'całe saldo' if available <= 10 else '50% salda'})"
+                                        f" | Zakłady przyjmujemy do **{cutoff_time}**"
+                                    )
+                                    if st.form_submit_button(
+                                        "💾 Zapisz zmiany", use_container_width=True
+                                    ):
+                                        ok, msg = upsert_bet(
+                                            username, match["id"], new_outcome, new_amount
+                                        )
+                                        if ok:
+                                            st.success(msg)
+                                            refresh_points()
+                                            st.rerun()
+                                        else:
+                                            st.error(msg)
+                        else:
+                            st.caption(f"🔒 Zakłady zamknięte (przyjmowaliśmy do {cutoff_time})")
+
+                    # ── Betting closed, no bet ────────────────────────────────
                     elif not betting_open:
-                        cutoff = (kickoff - timedelta(hours=1)).strftime("%H:%M")
-                        st.warning(f"🔒 Zakłady zamknięte — start o {match['time']}, przyjmowaliśmy do {cutoff}")
+                        st.warning(
+                            f"🔒 Zakłady zamknięte — przyjmowaliśmy do **{cutoff_time}**"
+                        )
 
-                    elif st.session_state["points"] <= 0:
+                    # ── No points ────────────────────────────────────────────
+                    elif current_pts <= 0:
                         st.error("❌ Nie masz punktów do postawienia.")
 
+                    # ── New bet form ──────────────────────────────────────────
                     else:
+                        _outcome_opts = {
+                            "home": f"🏠 {match['home']} wygra",
+                            "draw": "🤝 Remis",
+                            "away": f"✈️ {match['away']} wygra",
+                        }
                         with st.form(key=f"bet_{match['id']}"):
-                            c1, c2, c3 = st.columns(3)
-                            home_pts = c1.number_input(
-                                f"🏠 {match['home']} wygra",
-                                min_value=0.0, value=0.0, step=1.0, format="%.2f",
+                            selected_outcome = st.radio(
+                                "Typ zakładu",
+                                options=list(_outcome_opts.keys()),
+                                format_func=lambda k: _outcome_opts[k],
+                                horizontal=True,
                             )
-                            draw_pts = c2.number_input(
-                                "🤝 Remis",
-                                min_value=0.0, value=0.0, step=1.0, format="%.2f",
+                            amount = st.number_input(
+                                "Kwota (pkt)",
+                                min_value=0.01,
+                                max_value=float(max_allowed),
+                                value=1.0,
+                                step=0.5,
+                                format="%.2f",
                             )
-                            away_pts = c3.number_input(
-                                f"✈️ {match['away']} wygra",
-                                min_value=0.0, value=0.0, step=1.0, format="%.2f",
-                            )
-
-                            total_to_bet = home_pts + draw_pts + away_pts
                             st.caption(
-                                f"Łącznie do odjęcia: **{total_to_bet:.2f} pkt** | "
-                                f"Twoje saldo: **{st.session_state['points']:.2f} pkt**"
+                                f"Maks. zakład: **{max_allowed:.2f} pkt** "
+                                f"({'całe saldo' if current_pts <= 10 else '50% salda'})"
+                                f" | Zakłady przyjmujemy do **{cutoff_time}**"
                             )
-
-                            submitted = st.form_submit_button(
+                            if st.form_submit_button(
                                 "🎯 Postaw zakład", use_container_width=True
-                            )
-
-                            if submitted:
-                                ok, msg = place_bet(username, match["id"], home_pts, draw_pts, away_pts)
+                            ):
+                                ok, msg = upsert_bet(
+                                    username, match["id"], selected_outcome, amount
+                                )
                                 if ok:
                                     st.success(msg)
                                     refresh_points()
                                     st.rerun()
                                 else:
                                     st.error(msg)
+
+                    # ── Other users' bets ─────────────────────────────────────
+                    if all_bets:
+                        with st.expander(f"👥 Zakłady graczy ({len(all_bets)})"):
+                            for bet in all_bets:
+                                marker = " ← Ty" if bet["username"] == username else ""
+                                label = outcome_label(bet["outcome"], match)
+                                st.write(
+                                    f"**{bet['username']}**{marker}: {label} — {bet['amount']:.2f} pkt"
+                                )

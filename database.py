@@ -24,19 +24,23 @@ def init_db() -> None:
                 created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS bets (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                username   TEXT    NOT NULL,
-                match_id   TEXT    NOT NULL,
-                home_pts   REAL    NOT NULL DEFAULT 0,
-                draw_pts   REAL    NOT NULL DEFAULT 0,
-                away_pts   REAL    NOT NULL DEFAULT 0,
-                total_pts  REAL    NOT NULL DEFAULT 0,
-                placed_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(username, match_id)
-            )
-        """)
+        # Migrate bets table if old schema (home_pts/draw_pts/away_pts) is present
+        try:
+            conn.execute("SELECT outcome FROM bets LIMIT 1")
+        except sqlite3.OperationalError:
+            conn.execute("DROP TABLE IF EXISTS bets")
+            conn.execute("""
+                CREATE TABLE bets (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username   TEXT    NOT NULL,
+                    match_id   TEXT    NOT NULL,
+                    outcome    TEXT    NOT NULL CHECK(outcome IN ('home', 'draw', 'away')),
+                    amount     REAL    NOT NULL,
+                    placed_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(username, match_id)
+                )
+            """)
         conn.commit()
 
 
@@ -74,11 +78,11 @@ def get_user(username: str) -> dict | None:
     return dict(row) if row else None
 
 
-def update_points(username: str, delta: int) -> int:
+def update_points(username: str, delta: float) -> float:
     """Add or subtract points. Returns the new balance."""
     with get_connection() as conn:
         conn.execute(
-            "UPDATE users SET points = points + ? WHERE username = ?",
+            "UPDATE users SET points = ROUND(points + ?, 2) WHERE username = ?",
             (delta, username),
         )
         conn.commit()
@@ -88,20 +92,19 @@ def update_points(username: str, delta: int) -> int:
     return row["points"] if row else 0
 
 
-def place_bet(
+def upsert_bet(
     username: str,
     match_id: str,
-    home_pts: float,
-    draw_pts: float,
-    away_pts: float,
+    outcome: str,
+    amount: float,
 ) -> tuple[bool, str]:
-    home_pts = round(home_pts, 2)
-    draw_pts = round(draw_pts, 2)
-    away_pts = round(away_pts, 2)
-    total = round(home_pts + draw_pts + away_pts, 2)
+    """Place or update a bet. Returns (success, message)."""
+    amount = round(amount, 2)
 
-    if total <= 0:
-        return False, "Podaj punkty do postawienia (łącznie > 0)."
+    if amount <= 0:
+        return False, "Kwota musi być większa niż 0."
+    if outcome not in ("home", "draw", "away"):
+        return False, "Nieprawidłowy typ zakładu."
 
     with get_connection() as conn:
         user = conn.execute(
@@ -109,37 +112,74 @@ def place_bet(
         ).fetchone()
         if not user:
             return False, "Użytkownik nie istnieje."
-        if round(user["points"], 2) < total:
-            return False, f"Za mało punktów. Masz {user['points']:.2f} pkt, potrzebujesz {total:.2f} pkt."
 
+        current_pts = round(user["points"], 2)
         existing = conn.execute(
-            "SELECT id FROM bets WHERE username = ? AND match_id = ?", (username, match_id)
+            "SELECT amount FROM bets WHERE username = ? AND match_id = ?",
+            (username, match_id),
         ).fetchone()
-        if existing:
-            return False, "Zakład na ten mecz już został złożony."
+        old_amount = round(existing["amount"], 2) if existing else 0.0
 
-        conn.execute(
-            "INSERT INTO bets (username, match_id, home_pts, draw_pts, away_pts, total_pts) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (username, match_id, home_pts, draw_pts, away_pts, total),
-        )
-        conn.execute(
-            "UPDATE users SET points = ROUND(points - ?, 2) WHERE username = ?",
-            (total, username),
-        )
+        # Effective balance = current + already staked on this match (will be refunded if editing)
+        available = round(current_pts + old_amount, 2)
+        max_allowed = available if available <= 10 else round(available * 0.5, 2)
+
+        if amount > max_allowed:
+            if available <= 10:
+                return False, f"Za mało punktów. Masz dostępne {available:.2f} pkt."
+            return False, (
+                f"Maksymalny zakład to {max_allowed:.2f} pkt "
+                f"(50% z {available:.2f} pkt)."
+            )
+
+        if existing:
+            conn.execute(
+                "UPDATE bets SET outcome = ?, amount = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE username = ? AND match_id = ?",
+                (outcome, amount, username, match_id),
+            )
+            net = round(amount - old_amount, 2)
+            conn.execute(
+                "UPDATE users SET points = ROUND(points - ?, 2) WHERE username = ?",
+                (net, username),
+            )
+            if net >= 0:
+                msg = f"Zakład zaktualizowany! Odjęto dodatkowe {net:.2f} pkt."
+            else:
+                msg = f"Zakład zaktualizowany! Zwrócono {abs(net):.2f} pkt."
+        else:
+            conn.execute(
+                "INSERT INTO bets (username, match_id, outcome, amount) VALUES (?, ?, ?, ?)",
+                (username, match_id, outcome, amount),
+            )
+            conn.execute(
+                "UPDATE users SET points = ROUND(points - ?, 2) WHERE username = ?",
+                (amount, username),
+            )
+            msg = f"Zakład przyjęty! Odjęto {amount:.2f} pkt."
+
         conn.commit()
 
-    return True, f"Zakład przyjęty! Odjęto {total:.2f} pkt."
+    return True, msg
 
 
 def get_user_bet(username: str, match_id: str) -> dict | None:
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT home_pts, draw_pts, away_pts, total_pts FROM bets "
-            "WHERE username = ? AND match_id = ?",
+            "SELECT outcome, amount FROM bets WHERE username = ? AND match_id = ?",
             (username, match_id),
         ).fetchone()
     return dict(row) if row else None
+
+
+def get_match_bets(match_id: str) -> list[dict]:
+    """All bets placed on a given match, ordered by time placed."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT username, outcome, amount FROM bets WHERE match_id = ? ORDER BY placed_at",
+            (match_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def get_leaderboard() -> list[dict]:

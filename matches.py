@@ -62,3 +62,11 @@ def is_betting_open(date_str: str, time_str: str) -> bool:
 
 def kickoff_datetime(date_str: str, time_str: str) -> datetime:
     return datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M").replace(tzinfo=WARSAW)
+
+
+def outcome_label(outcome: str, match: dict) -> str:
+    if outcome == "home":
+        return f"🏠 {match['home']} wygra"
+    if outcome == "draw":
+        return "🤝 Remis"
+    return f"✈️ {match['away']} wygra"
