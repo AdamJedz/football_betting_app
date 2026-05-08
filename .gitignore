@@ -15,6 +15,12 @@ build/
 *.egg-info/
 *.egg
 
+# Database
+data/
+
+# Streamlit secrets (never commit these)
+.streamlit/secrets.toml
+
 # Environment variables
 .env
 .env.*

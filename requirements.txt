@@ -1,2 +1,2 @@
-# Add your dependencies here
-# e.g. requests, pandas, flask, etc.
+streamlit>=1.32.0
+bcrypt>=4.1.0
