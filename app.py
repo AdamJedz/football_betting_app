@@ -6,11 +6,13 @@ import streamlit as st
 from auth import logout, refresh_points, require_auth
 from database import get_leaderboard, get_match_bets, get_user_bet, init_db, upsert_bet
 from matches import (
+    flag,
     format_day_label,
     get_matches_by_day,
     is_betting_open,
     kickoff_datetime,
     outcome_label,
+    team_label,
 )
 
 st.set_page_config(
@@ -95,11 +97,27 @@ with tab2:
 
                 with st.container(border=True):
                     # Header row
+                    o = match["odds"]
                     col_title, col_time = st.columns([4, 1])
                     with col_title:
-                        st.markdown(f"#### {match['home']} vs {match['away']}")
+                        st.markdown(
+                            f"#### {team_label(match['home'], o[0])}"
+                            f" &nbsp;vs&nbsp; "
+                            f"{team_label(match['away'], o[2])}"
+                            f" &nbsp;·&nbsp; 🤝 Remis ({o[1]:.2f})"
+                        )
                     with col_time:
                         st.markdown(f"🕐 **{match['time']}**")
+
+                    # ── Other users' bets (always visible) ───────────────────
+                    other_bets = [b for b in all_bets if b["username"] != username]
+                    with st.expander(f"👥 Zakłady graczy ({len(other_bets)})"):
+                        if other_bets:
+                            for bet in other_bets:
+                                label = outcome_label(bet["outcome"], match)
+                                st.write(f"**{bet['username']}**: {label} — {bet['amount']:.2f} pkt")
+                        else:
+                            st.caption("Nikt jeszcze nie postawił zakładu.")
 
                     # ── Existing bet ──────────────────────────────────────────
                     if existing_bet:
@@ -111,9 +129,9 @@ with tab2:
                         if betting_open:
                             with st.expander("✏️ Edytuj zakład"):
                                 _outcome_opts = {
-                                    "home": f"🏠 {match['home']} wygra",
-                                    "draw": "🤝 Remis",
-                                    "away": f"✈️ {match['away']} wygra",
+                                    "home":  outcome_label("home", match),
+                                    "draw":  outcome_label("draw", match),
+                                    "away":  outcome_label("away", match),
                                 }
                                 with st.form(key=f"bet_{match['id']}"):
                                     new_outcome = st.radio(
@@ -203,12 +221,3 @@ with tab2:
                                 else:
                                     st.error(msg)
 
-                    # ── Other users' bets ─────────────────────────────────────
-                    if all_bets:
-                        with st.expander(f"👥 Zakłady graczy ({len(all_bets)})"):
-                            for bet in all_bets:
-                                marker = " ← Ty" if bet["username"] == username else ""
-                                label = outcome_label(bet["outcome"], match)
-                                st.write(
-                                    f"**{bet['username']}**{marker}: {label} — {bet['amount']:.2f} pkt"
-                                )
