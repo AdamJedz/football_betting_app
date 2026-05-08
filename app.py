@@ -7,10 +7,12 @@ import streamlit as st
 from auth import logout, refresh_points, require_auth
 from database import (
     clear_match_result,
+    get_audit_log,
     get_leaderboard,
     get_match_bets,
     get_match_odds,
     get_match_result,
+    get_points_history,
     get_user_bet,
     init_db,
     set_match_odds,
@@ -250,7 +252,7 @@ def _render_kolejka(matches_list: list) -> None:
                                     st.error(msg)
 
                             if revert:
-                                ok, msg = clear_match_result(match["id"])
+                                ok, msg = clear_match_result(match["id"], username)
                                 if ok:
                                     st.success(msg)
                                     refresh_points()
@@ -270,7 +272,8 @@ def _render_kolejka(matches_list: list) -> None:
 
 # --- Tabs ---
 (tab_tabela, tab_k1, tab_k2, tab_k3,
- tab_r32, tab_r16, tab_qf, tab_sf, tab_final) = st.tabs([
+ tab_r32, tab_r16, tab_qf, tab_sf, tab_final,
+ tab_historia, tab_wykres) = st.tabs([
     "🏆 Tabela",
     "⚽ Kolejka 1",
     "⚽ Kolejka 2",
@@ -280,6 +283,8 @@ def _render_kolejka(matches_list: list) -> None:
     "🏅 Ćwierćfinały",
     "🏅 Półfinały",
     "🏆 Finał",
+    "📋 Historia",
+    "📈 Wykres",
 ])
 
 # ── Tabela ────────────────────────────────────────────────────────────────────
@@ -403,3 +408,69 @@ with tab_final:
 | **Gospodarz** | Do ustalenia |
 | **Gość** | Do ustalenia |
 """)
+
+# ── Historia akcji ────────────────────────────────────────────────────────────
+with tab_historia:
+    st.subheader("📋 Historia akcji")
+
+    log = get_audit_log(limit=1000)
+
+    if not log:
+        st.info("Brak zapisanych akcji.")
+    else:
+        df_log = pd.DataFrame(log).rename(columns={
+            "action_at":   "Czas",
+            "action_type": "Akcja",
+            "username":    "Użytkownik",
+            "details":     "Szczegóły",
+        })
+
+        col_filter_user, col_filter_type, _ = st.columns([2, 2, 4])
+        users_in_log = ["Wszyscy"] + sorted(df_log["Użytkownik"].unique().tolist())
+        types_in_log = ["Wszystkie"] + sorted(df_log["Akcja"].unique().tolist())
+
+        sel_user = col_filter_user.selectbox("Użytkownik", users_in_log, key="log_user")
+        sel_type = col_filter_type.selectbox("Typ akcji", types_in_log, key="log_type")
+
+        if sel_user != "Wszyscy":
+            df_log = df_log[df_log["Użytkownik"] == sel_user]
+        if sel_type != "Wszystkie":
+            df_log = df_log[df_log["Akcja"] == sel_type]
+
+        st.dataframe(df_log, use_container_width=True, hide_index=True)
+
+# ── Wykres punktów ────────────────────────────────────────────────────────────
+with tab_wykres:
+    import plotly.graph_objects as go
+
+    st.subheader("📈 Wykres punktów")
+
+    history = get_points_history()
+
+    if not history:
+        st.info("Brak danych — wyniki meczów nie zostały jeszcze wprowadzone.")
+    else:
+        df_hist = pd.DataFrame(history)
+        df_hist["day"] = pd.to_datetime(df_hist["day"])
+
+        # Build one trace per user
+        fig = go.Figure()
+        for user in sorted(df_hist["username"].unique()):
+            u_df = df_hist[df_hist["username"] == user].sort_values("day")
+            fig.add_trace(go.Scatter(
+                x=u_df["day"],
+                y=u_df["points"],
+                mode="lines+markers",
+                name=user,
+                hovertemplate="%{y:.2f} pkt<extra>%{fullData.name}</extra>",
+            ))
+
+        fig.update_layout(
+            xaxis_title="Dzień",
+            yaxis_title="Punkty",
+            hovermode="x unified",
+            legend_title="Gracz",
+            margin=dict(l=0, r=0, t=30, b=0),
+            xaxis=dict(tickformat="%d %b"),
+        )
+        st.plotly_chart(fig, use_container_width=True)

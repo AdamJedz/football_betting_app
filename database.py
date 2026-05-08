@@ -65,8 +65,45 @@ def init_db() -> None:
                 set_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                action_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                action_type TEXT      NOT NULL,
+                username    TEXT      NOT NULL,
+                details     TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS points_snapshots (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                username    TEXT    NOT NULL,
+                points      REAL    NOT NULL,
+                match_id    TEXT,
+                recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         conn.commit()
 
+
+# ── Internal helpers ───────────────────────────────────────────────────────────
+
+def _log(conn, username: str, action_type: str, details: str) -> None:
+    conn.execute(
+        "INSERT INTO audit_log (username, action_type, details) VALUES (?, ?, ?)",
+        (username, action_type, details),
+    )
+
+
+def _snapshot(conn, match_id: str) -> None:
+    users = conn.execute("SELECT username, points FROM users").fetchall()
+    conn.executemany(
+        "INSERT INTO points_snapshots (username, points, match_id) VALUES (?, ?, ?)",
+        [(u["username"], round(u["points"], 2), match_id) for u in users],
+    )
+
+
+# ── Odds ───────────────────────────────────────────────────────────────────────
 
 def get_match_odds(match_id: str) -> tuple[float, float, float] | None:
     with get_connection() as conn:
@@ -92,8 +129,12 @@ def set_match_odds(
                    updated_at = CURRENT_TIMESTAMP""",
             (match_id, round(home, 2), round(draw, 2), round(away, 2), username),
         )
+        _log(conn, username, "kursy",
+             f"{match_id}: {home:.2f} / {draw:.2f} / {away:.2f}")
         conn.commit()
 
+
+# ── Users ──────────────────────────────────────────────────────────────────────
 
 def create_user(username: str, password: str, points: int = 100) -> bool:
     password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
@@ -130,7 +171,6 @@ def get_user(username: str) -> dict | None:
 
 
 def update_points(username: str, delta: float) -> float:
-    """Add or subtract points. Returns the new balance."""
     with get_connection() as conn:
         conn.execute(
             "UPDATE users SET points = ROUND(points + ?, 2) WHERE username = ?",
@@ -143,13 +183,14 @@ def update_points(username: str, delta: float) -> float:
     return row["points"] if row else 0
 
 
+# ── Bets ───────────────────────────────────────────────────────────────────────
+
 def upsert_bet(
     username: str,
     match_id: str,
     outcome: str,
     amount: float,
 ) -> tuple[bool, str]:
-    """Place or update a bet. Returns (success, message)."""
     amount = round(amount, 2)
 
     if amount <= 0:
@@ -171,7 +212,6 @@ def upsert_bet(
         ).fetchone()
         old_amount = round(existing["amount"], 2) if existing else 0.0
 
-        # Effective balance = current + already staked on this match (will be refunded if editing)
         available = round(current_pts + old_amount, 2)
         max_allowed = available if available <= 10 else round(available * 0.5, 2)
 
@@ -194,10 +234,11 @@ def upsert_bet(
                 "UPDATE users SET points = ROUND(points - ?, 2) WHERE username = ?",
                 (net, username),
             )
-            if net >= 0:
-                msg = f"Zakład zaktualizowany! Odjęto dodatkowe {net:.2f} pkt."
-            else:
-                msg = f"Zakład zaktualizowany! Zwrócono {abs(net):.2f} pkt."
+            _log(conn, username, "edycja zakładu",
+                 f"{match_id}: {outcome}, {amount:.2f} pkt (poprzednio {old_amount:.2f} pkt)")
+            msg = (f"Zakład zaktualizowany! Odjęto dodatkowe {net:.2f} pkt."
+                   if net >= 0 else
+                   f"Zakład zaktualizowany! Zwrócono {abs(net):.2f} pkt.")
         else:
             conn.execute(
                 "INSERT INTO bets (username, match_id, outcome, amount) VALUES (?, ?, ?, ?)",
@@ -207,6 +248,8 @@ def upsert_bet(
                 "UPDATE users SET points = ROUND(points - ?, 2) WHERE username = ?",
                 (amount, username),
             )
+            _log(conn, username, "zakład",
+                 f"{match_id}: {outcome}, {amount:.2f} pkt")
             msg = f"Zakład przyjęty! Odjęto {amount:.2f} pkt."
 
         conn.commit()
@@ -224,7 +267,6 @@ def get_user_bet(username: str, match_id: str) -> dict | None:
 
 
 def get_match_bets(match_id: str) -> list[dict]:
-    """All bets placed on a given match, ordered by time placed."""
     with get_connection() as conn:
         rows = conn.execute(
             "SELECT username, outcome, amount, payout FROM bets WHERE match_id = ? ORDER BY placed_at",
@@ -232,6 +274,8 @@ def get_match_bets(match_id: str) -> list[dict]:
         ).fetchall()
     return [dict(r) for r in rows]
 
+
+# ── Results ────────────────────────────────────────────────────────────────────
 
 def get_match_result(match_id: str) -> dict | None:
     with get_connection() as conn:
@@ -245,7 +289,6 @@ def get_match_result(match_id: str) -> dict | None:
 def set_match_result(
     match_id: str, result: str, setter: str, odds: tuple[float, float, float]
 ) -> tuple[bool, str]:
-    """Set or update match result. Reverts old payouts then applies new ones atomically."""
     if result not in ("home", "draw", "away"):
         return False, "Nieprawidłowy wynik."
 
@@ -256,7 +299,7 @@ def set_match_result(
             "SELECT result FROM match_results WHERE match_id = ?", (match_id,)
         ).fetchone()
 
-        # Revert any existing payouts before applying new ones
+        # Revert any existing payouts
         paid_bets = conn.execute(
             "SELECT username, payout FROM bets WHERE match_id = ? AND payout IS NOT NULL",
             (match_id,),
@@ -296,14 +339,16 @@ def set_match_result(
             )
             payout_count += 1
 
+        action = "zaktualizowany" if existing else "zapisany"
+        _log(conn, setter, "wynik",
+             f"{match_id}: {result}, kurs {winning_odds:.2f}, wypłaty dla {payout_count} graczy")
+        _snapshot(conn, match_id)
         conn.commit()
 
-    action = "zaktualizowany" if existing else "zapisany"
     return True, f"Wynik {action}! Wypłacono punkty dla {payout_count} graczy."
 
 
-def clear_match_result(match_id: str) -> tuple[bool, str]:
-    """Remove result and reverse all payouts."""
+def clear_match_result(match_id: str, username: str = "system") -> tuple[bool, str]:
     with get_connection() as conn:
         existing = conn.execute(
             "SELECT result FROM match_results WHERE match_id = ?", (match_id,)
@@ -322,14 +367,52 @@ def clear_match_result(match_id: str) -> tuple[bool, str]:
             )
         conn.execute("UPDATE bets SET payout = NULL WHERE match_id = ?", (match_id,))
         conn.execute("DELETE FROM match_results WHERE match_id = ?", (match_id,))
+
+        _log(conn, username, "cofnięcie wyniku",
+             f"{match_id}: przywrócono punkty dla {len(paid_bets)} graczy")
+        _snapshot(conn, match_id)
         conn.commit()
 
     return True, f"Wynik cofnięty, przywrócono punkty dla {len(paid_bets)} graczy."
 
+
+# ── Leaderboard ────────────────────────────────────────────────────────────────
 
 def get_leaderboard() -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute(
             "SELECT username, points FROM users ORDER BY points DESC"
         ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Audit log ──────────────────────────────────────────────────────────────────
+
+def get_audit_log(limit: int = 500) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """SELECT action_at, action_type, username, details
+               FROM audit_log ORDER BY action_at DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Points history ─────────────────────────────────────────────────────────────
+
+def get_points_history() -> list[dict]:
+    """Last snapshot per user per calendar day (Warsaw time)."""
+    with get_connection() as conn:
+        rows = conn.execute("""
+            SELECT username,
+                   DATE(recorded_at, 'localtime') AS day,
+                   points
+            FROM   points_snapshots
+            WHERE  id IN (
+                SELECT MAX(id)
+                FROM   points_snapshots
+                GROUP  BY username, DATE(recorded_at, 'localtime')
+            )
+            ORDER  BY day, username
+        """).fetchall()
     return [dict(r) for r in rows]
