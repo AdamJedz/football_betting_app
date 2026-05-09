@@ -1,28 +1,103 @@
 import os
+from contextlib import contextmanager
 
 import bcrypt
 import psycopg2
 import psycopg2.extras
+import psycopg2.pool
 
+# Streamlit is optional — not available when running init_users.py directly
 try:
     import streamlit as st
+    _HAS_ST = True
     _secrets = st.secrets
 except Exception:
+    st = None  # type: ignore
+    _HAS_ST = False
     _secrets = {}
 
 
-def get_connection() -> psycopg2.extensions.connection:
+# ── URL ────────────────────────────────────────────────────────────────────────
+
+def _get_url() -> str:
     url = (
         (getattr(_secrets, "get", lambda k, d=None: d)("DATABASE_URL"))
         or os.environ.get("DATABASE_URL")
     )
     if not url:
-        raise RuntimeError("DATABASE_URL not set. Add it to .streamlit/secrets.toml or environment.")
-    conn = psycopg2.connect(url, cursor_factory=psycopg2.extras.RealDictCursor)
-    return conn
+        raise RuntimeError(
+            "DATABASE_URL not set. Add it to .streamlit/secrets.toml or environment."
+        )
+    return url
+
+
+# ── Connection pool (Streamlit) / direct connection (scripts) ─────────────────
+
+if _HAS_ST:
+    @st.cache_resource
+    def _pool() -> psycopg2.pool.ThreadedConnectionPool:
+        """One pool shared across all Streamlit sessions — created once."""
+        return psycopg2.pool.ThreadedConnectionPool(
+            1, 10, _get_url(), cursor_factory=psycopg2.extras.RealDictCursor
+        )
+
+    @contextmanager
+    def get_connection():
+        pool = _pool()
+        conn = pool.getconn()
+        try:
+            yield conn
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            # Return connection in a clean state
+            if not conn.closed:
+                try:
+                    conn.rollback()  # no-op if already committed
+                except Exception:
+                    pass
+            pool.putconn(conn)
+
+    def _clear_caches() -> None:
+        st.cache_data.clear()
+
+else:
+    @contextmanager
+    def get_connection():
+        conn = psycopg2.connect(
+            _get_url(), cursor_factory=psycopg2.extras.RealDictCursor
+        )
+        try:
+            yield conn
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _clear_caches() -> None:
+        pass
+
+
+# ── Cache decorator (no-op outside Streamlit) ─────────────────────────────────
+
+def _cached(ttl: int = 30):
+    """Apply st.cache_data(ttl=ttl) in Streamlit; identity decorator otherwise."""
+    if _HAS_ST:
+        return st.cache_data(ttl=ttl)
+    return lambda f: f
+
+
+# ── Schema init (runs once per process) ───────────────────────────────────────
+
+_db_initialized = False
 
 
 def init_db() -> None:
+    global _db_initialized
+    if _db_initialized:
+        return
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -84,6 +159,7 @@ def init_db() -> None:
                 )
             """)
         conn.commit()
+    _db_initialized = True
 
 
 # ── Internal helpers ───────────────────────────────────────────────────────────
@@ -106,6 +182,7 @@ def _snapshot(cur, match_id: str) -> None:
 
 # ── Odds ───────────────────────────────────────────────────────────────────────
 
+@_cached(ttl=30)
 def get_match_odds(match_id: str) -> tuple[float, float, float] | None:
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -136,6 +213,7 @@ def set_match_odds(
             _log(cur, username, "kursy",
                  f"{match_id}: {home:.2f} / {draw:.2f} / {away:.2f}")
         conn.commit()
+    _clear_caches()
 
 
 # ── Users ──────────────────────────────────────────────────────────────────────
@@ -168,6 +246,7 @@ def verify_user(username: str, password: str) -> dict | None:
     return None
 
 
+@_cached(ttl=30)
 def get_user(username: str) -> dict | None:
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -189,6 +268,7 @@ def update_points(username: str, delta: float) -> float:
             cur.execute("SELECT points FROM users WHERE username = %s", (username,))
             row = cur.fetchone()
         conn.commit()
+    _clear_caches()
     return row["points"] if row else 0
 
 
@@ -263,10 +343,11 @@ def upsert_bet(
                 msg = f"Zakład przyjęty! Odjęto {amount:.2f} pkt."
 
         conn.commit()
-
+    _clear_caches()
     return True, msg
 
 
+@_cached(ttl=30)
 def get_user_bet(username: str, match_id: str) -> dict | None:
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -278,6 +359,7 @@ def get_user_bet(username: str, match_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+@_cached(ttl=30)
 def get_match_bets(match_id: str) -> list[dict]:
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -292,6 +374,7 @@ def get_match_bets(match_id: str) -> list[dict]:
 
 # ── Results ────────────────────────────────────────────────────────────────────
 
+@_cached(ttl=30)
 def get_match_result(match_id: str) -> dict | None:
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -369,7 +452,7 @@ def set_match_result(
             _snapshot(cur, match_id)
 
         conn.commit()
-
+    _clear_caches()
     return True, f"Wynik {action}! Wypłacono punkty dla {payout_count} graczy."
 
 
@@ -401,12 +484,13 @@ def clear_match_result(match_id: str, username: str = "system") -> tuple[bool, s
             _snapshot(cur, match_id)
 
         conn.commit()
-
+    _clear_caches()
     return True, f"Wynik cofnięty, przywrócono punkty dla {len(paid_bets)} graczy."
 
 
 # ── Leaderboard ────────────────────────────────────────────────────────────────
 
+@_cached(ttl=30)
 def get_leaderboard() -> list[dict]:
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -417,6 +501,7 @@ def get_leaderboard() -> list[dict]:
 
 # ── Audit log ──────────────────────────────────────────────────────────────────
 
+@_cached(ttl=30)
 def get_audit_log(limit: int = 500) -> list[dict]:
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -431,6 +516,7 @@ def get_audit_log(limit: int = 500) -> list[dict]:
 
 # ── Points history ─────────────────────────────────────────────────────────────
 
+@_cached(ttl=30)
 def get_points_history() -> list[dict]:
     """Last snapshot per user per calendar day (server time)."""
     with get_connection() as conn:
